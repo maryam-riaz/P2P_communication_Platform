@@ -1,0 +1,45 @@
+# Dependencies
+node_modules/
+.pnpm-store/
+
+# Build outputs
+dist/
+build/
+bin/
+out/
+
+# Expo / Mobile builds
+.expo/
+*.jks
+*.p8
+*.spc
+*.key
+*.apk
+*.apks
+*.aab
+*.ipa
+
+# Database & log files
+*.log
+*.sqlite
+*.sqlite-journal
+*.sqlite-shm
+*.sqlite-wal
+.watermelondb/
+
+# IDEs, text editors, and OS files
+.DS_Store
+.idea/
+.vscode/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.swp
+
+# Local environments / API Keys
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local

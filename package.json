@@ -1,0 +1,17 @@
+{
+  "name": "disaster-p2p-monorepo",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "test": "pnpm --recursive run test",
+    "test:shared": "pnpm --filter shared test",
+    "test:mobile": "pnpm --filter mobile test",
+    "test:backend": "pnpm --filter backend test"
+  },
+  "devDependencies": {
+    "typescript": "^5.5.0",
+    "jest": "^29.7.0",
+    "ts-jest": "^29.1.5",
+    "@types/jest": "^29.5.12"
+  }
+}
