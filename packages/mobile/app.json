@@ -1,0 +1,32 @@
+{
+  "expo": {
+    "name": "SOSIFY",
+    "slug": "sosify-app",
+    "version": "1.0.0",
+    "assetBundlePatterns": [
+      "**/*"
+    ],
+    "ios": {
+      "supportsTabletMode": true,
+      "icon": "./assets/images/icon.png"
+    },
+    "android": {
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/images/android-icon-foreground.png",
+        "backgroundImage": "./assets/images/android-icon-background.png",
+        "monochromeImage": "./assets/images/android-icon-monochrome.png",
+        "backgroundColor": "#000000"
+      },
+      "icon": "./assets/images/icon.png",
+      "package": "com.mojojojoo.sosifyapp"
+    },
+    "web": {
+      "favicon": "./assets/images/favicon.png"
+    },
+    "icon": "./assets/images/icon.png",
+    "splash": {
+      "image": "./assets/images/splash-icon.png",
+      "backgroundColor": "#000000"
+    }
+  }
+}
