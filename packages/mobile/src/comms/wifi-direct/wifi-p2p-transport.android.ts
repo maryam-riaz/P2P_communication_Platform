@@ -22,8 +22,14 @@ export interface WifiDirectConnectionInfo {
  * Android Wi-Fi Direct Transport implementation.
  *
  * Uses the native WifiDirectModule (WifiP2pManager) for peer discovery and
- * group formation, then opens raw TCP sockets for high-performance reliable
- * stream transfer — mirroring the design described in TRANSPORT.md.
+ * group formation, then uses the native TCP socket bridge exposed by
+ * WifiDirectModule (openServerSocket / connectToSocket / tcpSend) for
+ * high-performance reliable stream transfer.
+ *
+ * NOTE: Node's "net" module is NOT used here — it is unavailable in the
+ * React Native runtime. All socket I/O is handled inside the Kotlin module
+ * and bridged back via events ("WifiDirectTcpData", "WifiDirectTcpConnected",
+ * "WifiDirectTcpDisconnected").
  *
  * Usage:
  *   1. Call AndroidWifiP2PTransport.initialize() once at app startup
@@ -33,12 +39,15 @@ export interface WifiDirectConnectionInfo {
  *   5. Wrap with SecureTransport for ECDH handshake + AES encryption
  */
 export class AndroidWifiP2PTransport implements PeerTransport {
-  private socket: any = null;
-  private server: any = null;
   private isConnectedFlag = false;
   private messageCallback: ((data: Uint8Array) => void) | null = null;
   private disconnectCallback: (() => void) | null = null;
   private remotePeerId = 'unknown-android-peer';
+
+  // Native event subscriptions
+  private dataSubscription: ReturnType<NonNullable<typeof wifiDirectEmitter>['addListener']> | null = null;
+  private connectedSubscription: ReturnType<NonNullable<typeof wifiDirectEmitter>['addListener']> | null = null;
+  private disconnectedSubscription: ReturnType<NonNullable<typeof wifiDirectEmitter>['addListener']> | null = null;
 
   constructor(private localDeviceId: string) {}
 
@@ -135,24 +144,78 @@ export class AndroidWifiP2PTransport implements PeerTransport {
     await WifiDirect.disconnect();
   }
 
-  // ─── TCP Socket Layer ──────────────────────────────────────────────────────
+  // ─── Native TCP Socket Layer ───────────────────────────────────────────────
+
+  /**
+   * Registers native event listeners for incoming TCP data and connection state.
+   * Must be called before openServerSocket() or connectToSocket().
+   */
+  private setupNativeListeners(): void {
+    if (!wifiDirectEmitter) return;
+
+    // Incoming data: base64-encoded bytes from the Kotlin read loop
+    this.dataSubscription = wifiDirectEmitter.addListener(
+      'WifiDirectTcpData',
+      (base64: string) => {
+        if (this.messageCallback) {
+          // Decode base64 → Uint8Array without Buffer (not available in RN)
+          const binary = atob(base64);
+          const bytes = new Uint8Array(binary.length);
+          for (let i = 0; i < binary.length; i++) {
+            bytes[i] = binary.charCodeAt(i);
+          }
+          this.messageCallback(bytes);
+        }
+      },
+    );
+
+    // Client connected to our server socket
+    this.connectedSubscription = wifiDirectEmitter.addListener(
+      'WifiDirectTcpConnected',
+      () => {
+        console.log('[Android Wi-Fi Direct] TCP client connected to server socket.');
+        this.isConnectedFlag = true;
+      },
+    );
+
+    // Socket closed
+    this.disconnectedSubscription = wifiDirectEmitter.addListener(
+      'WifiDirectTcpDisconnected',
+      () => {
+        console.log('[Android Wi-Fi Direct] TCP socket disconnected.');
+        this.isConnectedFlag = false;
+        this.removeNativeListeners();
+        if (this.disconnectCallback) {
+          this.disconnectCallback();
+        }
+      },
+    );
+  }
+
+  private removeNativeListeners(): void {
+    this.dataSubscription?.remove();
+    this.connectedSubscription?.remove();
+    this.disconnectedSubscription?.remove();
+    this.dataSubscription = null;
+    this.connectedSubscription = null;
+    this.disconnectedSubscription = null;
+  }
 
   /**
    * Opens a TCP ServerSocket on the group owner device (port 8888 by default).
    * The group owner is determined by WifiP2pManager after group formation.
+   * Resolves immediately once the socket is bound; fires WifiDirectTcpConnected
+   * when a client connects.
    */
   async openServerSocket(port: number = 8888): Promise<void> {
+    if (!WifiDirect) {
+      console.warn('[Android Wi-Fi Direct] openServerSocket: native module not available.');
+      return;
+    }
     console.log(`[Android Wi-Fi Direct] Opening ServerSocket on port ${port}...`);
-    const net = require('net');
-    this.server = net.createServer((sock: any) => {
-      console.log('[Android Wi-Fi Direct] ServerSocket accepted incoming connection.');
-      this.socket = sock;
-      this.isConnectedFlag = true;
-      this.setupSocketListeners();
-    });
-    this.server.listen(port, '0.0.0.0', () => {
-      console.log(`[Android Wi-Fi Direct] ServerSocket listening on port ${port}.`);
-    });
+    this.setupNativeListeners();
+    await WifiDirect.openServerSocket(port);
+    console.log(`[Android Wi-Fi Direct] ServerSocket listening on port ${port}.`);
   }
 
   /**
@@ -160,58 +223,30 @@ export class AndroidWifiP2PTransport implements PeerTransport {
    * The group owner IP is obtained from getConnectionInfo().groupOwnerAddress.
    */
   async connectToSocket(ipAddress: string, port: number = 8888): Promise<void> {
+    if (!WifiDirect) {
+      console.warn('[Android Wi-Fi Direct] connectToSocket: native module not available.');
+      return;
+    }
     console.log(`[Android Wi-Fi Direct] Connecting TCP socket to ${ipAddress}:${port}`);
-    return new Promise((resolve, reject) => {
-      const net = require('net');
-      this.socket = new net.Socket();
-      this.socket.connect(port, ipAddress, () => {
-        console.log('[Android Wi-Fi Direct] TCP connection established to group owner.');
-        this.isConnectedFlag = true;
-        this.setupSocketListeners();
-        resolve();
-      });
-      this.socket.on('error', (err: any) => {
-        console.error('[Android Wi-Fi Direct] TCP connection error:', err);
-        reject(err);
-      });
-    });
-  }
-
-  private setupSocketListeners(): void {
-    if (!this.socket) return;
-
-    this.socket.on('data', (data: Buffer) => {
-      if (this.messageCallback) {
-        this.messageCallback(new Uint8Array(data));
-      }
-    });
-
-    this.socket.on('close', () => {
-      console.log('[Android Wi-Fi Direct] TCP socket closed.');
-      this.isConnectedFlag = false;
-      if (this.disconnectCallback) {
-        this.disconnectCallback();
-      }
-    });
-
-    this.socket.on('error', (err: any) => {
-      console.error('[Android Wi-Fi Direct] Socket error:', err);
-      this.disconnect();
-    });
+    this.setupNativeListeners();
+    await WifiDirect.connectToSocket(ipAddress, port);
+    this.isConnectedFlag = true;
+    console.log('[Android Wi-Fi Direct] TCP connection established to group owner.');
   }
 
   // ─── PeerTransport Interface ───────────────────────────────────────────────
 
   async send(data: Uint8Array): Promise<void> {
-    if (!this.isConnectedFlag || !this.socket) {
+    if (!this.isConnectedFlag || !WifiDirect) {
       throw new Error('[Android Wi-Fi Direct] Cannot send: transport is not connected.');
     }
-    return new Promise((resolve, reject) => {
-      this.socket.write(Buffer.from(data), (err: any) => {
-        if (err) reject(err);
-        else resolve();
-      });
-    });
+    // Encode Uint8Array → base64 without Buffer (not available in RN)
+    let binary = '';
+    for (let i = 0; i < data.length; i++) {
+      binary += String.fromCharCode(data[i]);
+    }
+    const base64 = btoa(binary);
+    await WifiDirect.tcpSend(base64);
   }
 
   receive(callback: (data: Uint8Array) => void): void {
@@ -224,13 +259,9 @@ export class AndroidWifiP2PTransport implements PeerTransport {
 
   async disconnect(): Promise<void> {
     this.isConnectedFlag = false;
-    if (this.socket) {
-      this.socket.destroy();
-      this.socket = null;
-    }
-    if (this.server) {
-      this.server.close();
-      this.server = null;
+    this.removeNativeListeners();
+    if (WifiDirect) {
+      await WifiDirect.tcpDisconnect();
     }
     console.log('[Android Wi-Fi Direct] TCP transport disconnected.');
   }
