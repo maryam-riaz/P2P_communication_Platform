@@ -81,7 +81,11 @@ export class BleAdvertiser {
     if (this.isAdvertising) return;
 
     const payloadBytes = this.getSerializedPayload();
-    const payloadBase64 = Buffer.from(payloadBytes).toString('base64');
+    let binary = '';
+    for (let i = 0; i < payloadBytes.length; i++) {
+      binary += String.fromCharCode(payloadBytes[i]);
+    }
+    const payloadBase64 = btoa(binary);
     const localName = `DisasterP2P-${this.deviceId.substring(0, 8)}`;
 
     if (!NativeBleAdvertiser) {

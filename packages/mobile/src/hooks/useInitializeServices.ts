@@ -11,6 +11,7 @@ import { MobileRepository } from '../db/repository';
 
 import { BleScanner } from '../comms/ble/ble-scanner';
 import { BleAdvertiser } from '../comms/ble/ble-advertiser';
+import { requestBlePermissions } from '../comms/ble/ble-permission-helper';
 import { AndroidWifiP2PTransport } from '../comms/wifi-direct/wifi-p2p-transport.android';
 import { SecureTransport } from '../comms/secure-transport';
 
@@ -53,7 +54,7 @@ export function useInitializeServices() {
           useIncrementalIndexedDB: false,
         });
       } else {
-        const SQLiteAdapterClass = eval('require')('@nozbe/watermelondb/adapters/sqlite').default;
+        const SQLiteAdapterClass = require('@nozbe/watermelondb/adapters/sqlite').default;
         adapter = new SQLiteAdapterClass({
           schema: localDbSchema,
           onSetUpError: (error: any) => console.error('WatermelonDB SQLite setup failed:', error),
@@ -92,6 +93,13 @@ export function useInitializeServices() {
         }
 
         console.log(`[P2P Bootstrap] Initializing transports for user: ${deviceId}`);
+
+        // Request Bluetooth permissions before starting advertising/scanning
+        const permissionsGranted = await requestBlePermissions();
+        if (!permissionsGranted) {
+          console.warn('[P2P Bootstrap] Bluetooth permissions not granted. Cannot start advertising or scanning.');
+          return;
+        }
 
         // Stop any old transports
         if (currentAdvertiser) await currentAdvertiser.stopAdvertising();

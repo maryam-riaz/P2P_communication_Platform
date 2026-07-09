@@ -5,6 +5,39 @@ import {
   verifyAndDecrypt 
 } from 'shared';
 
+// ─── RN-safe helpers (no Buffer / Node globals) ───────────────────────────────
+
+/** Encode a UTF-8 string → Uint8Array */
+function strToBytes(str: string): Uint8Array {
+  return new TextEncoder().encode(str);
+}
+
+/** Decode a Uint8Array → UTF-8 string */
+function bytesToStr(bytes: Uint8Array): string {
+  return new TextDecoder().decode(bytes);
+}
+
+/** Encode a Uint8Array → base64 string */
+function bytesToBase64(bytes: Uint8Array): string {
+  let binary = '';
+  for (let i = 0; i < bytes.length; i++) {
+    binary += String.fromCharCode(bytes[i]);
+  }
+  return btoa(binary);
+}
+
+/** Decode a base64 string → Uint8Array */
+function base64ToBytes(b64: string): Uint8Array {
+  const binary = atob(b64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+  return bytes;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+
 export class SecureTransport {
   private remotePublicKeyHex: string | null = null;
   private handshakeCompleted = false;
@@ -27,8 +60,7 @@ export class SecureTransport {
   async establishHandshake(): Promise<void> {
     console.log('[Secure Transport] Initiating unencrypted P2P public key exchange...');
     const keyMsg = `PUBKEY_EXCHANGE:${this.localPublicKeyHex}`;
-    const payload = Buffer.from(keyMsg, 'utf-8');
-    await this.rawTransport.send(new Uint8Array(payload));
+    await this.rawTransport.send(strToBytes(keyMsg));
   }
 
   /**
@@ -58,8 +90,8 @@ export class SecureTransport {
       throw new Error('Cryptographic handshake not completed yet');
     }
 
-    const plaintextBytes = Buffer.from(plaintext, 'utf-8');
-    
+    const plaintextBytes = strToBytes(plaintext);
+
     // Encrypt and sign the payload using ECDH P-256 and AES-256-GCM
     const packet: EncryptedPacket = encryptAndSign(
       plaintextBytes,
@@ -68,22 +100,21 @@ export class SecureTransport {
       this.remotePublicKeyHex
     );
 
-    // Serialize packet to JSON and send as bytes
+    // Serialize packet to JSON (all binary fields as base64) and send as bytes
     const serialized = JSON.stringify({
-      payload: Buffer.from(packet.payload).toString('base64'),
-      iv: Buffer.from(packet.iv).toString('base64'),
-      tag: Buffer.from(packet.tag).toString('base64'),
-      signature: Buffer.from(packet.signature).toString('base64'),
-      sender_public_key: Buffer.from(packet.sender_public_key).toString('base64'),
-      content_hash: Buffer.from(packet.content_hash).toString('base64')
+      payload:           bytesToBase64(packet.payload),
+      iv:                bytesToBase64(packet.iv),
+      tag:               bytesToBase64(packet.tag),
+      signature:         bytesToBase64(packet.signature),
+      sender_public_key: bytesToBase64(packet.sender_public_key),
+      content_hash:      bytesToBase64(packet.content_hash),
     });
 
-    const payloadBytes = Buffer.from(serialized, 'utf-8');
-    await this.rawTransport.send(new Uint8Array(payloadBytes));
+    await this.rawTransport.send(strToBytes(serialized));
   }
 
   private handleRawReceivedData(data: Uint8Array): void {
-    const rawStr = Buffer.from(data).toString('utf-8');
+    const rawStr = bytesToStr(data);
 
     // Case 1: Handshake key exchange
     if (rawStr.startsWith('PUBKEY_EXCHANGE:')) {
@@ -91,7 +122,7 @@ export class SecureTransport {
       this.remotePublicKeyHex = parts[1];
       this.handshakeCompleted = true;
       console.log(`[Secure Transport] Handshake complete! Received remote public key: ${this.remotePublicKeyHex.substring(0, 16)}...`);
-      
+
       // Trigger all pending handshake ready callbacks
       this.handshakeCallbacks.forEach((cb) => cb());
       this.handshakeCallbacks = [];
@@ -107,17 +138,17 @@ export class SecureTransport {
     try {
       const parsed = JSON.parse(rawStr);
       const packet: EncryptedPacket = {
-        payload: new Uint8Array(Buffer.from(parsed.payload, 'base64')),
-        iv: new Uint8Array(Buffer.from(parsed.iv, 'base64')),
-        tag: new Uint8Array(Buffer.from(parsed.tag, 'base64')),
-        signature: new Uint8Array(Buffer.from(parsed.signature, 'base64')),
-        sender_public_key: new Uint8Array(Buffer.from(parsed.sender_public_key, 'base64')),
-        content_hash: new Uint8Array(Buffer.from(parsed.content_hash, 'base64'))
+        payload:           base64ToBytes(parsed.payload),
+        iv:                base64ToBytes(parsed.iv),
+        tag:               base64ToBytes(parsed.tag),
+        signature:         base64ToBytes(parsed.signature),
+        sender_public_key: base64ToBytes(parsed.sender_public_key),
+        content_hash:      base64ToBytes(parsed.content_hash),
       };
 
       // Decrypt and verify digital signatures
       const decryptedBytes = verifyAndDecrypt(packet, this.localPrivateKeyHex);
-      const plaintext = Buffer.from(decryptedBytes).toString('utf-8');
+      const plaintext = bytesToStr(decryptedBytes);
 
       if (this.onMessageCallback) {
         this.onMessageCallback(plaintext);

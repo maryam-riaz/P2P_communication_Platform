@@ -3,8 +3,12 @@ import { PeerTransport } from '../transport';
 
 const { WifiDirect } = NativeModules;
 
-// Event emitter for Wi-Fi Direct system broadcasts forwarded from Kotlin
-const wifiDirectEmitter = WifiDirect ? new NativeEventEmitter(WifiDirect) : null;
+// Module-level emitter for app-wide P2P system broadcasts (peer discovery,
+// connection info). Separate from the per-instance TCP data emitters.
+const staticWifiDirectEmitter = WifiDirect ? new NativeEventEmitter(WifiDirect) : null;
+
+// NativeEventEmitter is also instantiated per-transport-instance (inside the
+// constructor) so each AndroidWifiP2PTransport gets its own TCP event scope.
 
 export interface WifiDirectPeer {
   deviceName: string;
@@ -43,13 +47,20 @@ export class AndroidWifiP2PTransport implements PeerTransport {
   private messageCallback: ((data: Uint8Array) => void) | null = null;
   private disconnectCallback: (() => void) | null = null;
   private remotePeerId = 'unknown-android-peer';
+  private _isServer = false; // true for group owner (server socket side)
+
+  // Per-instance NativeEventEmitter — gives each transport its own event scope
+  private readonly wifiDirectEmitter: InstanceType<typeof NativeEventEmitter> | null;
 
   // Native event subscriptions
-  private dataSubscription: ReturnType<NonNullable<typeof wifiDirectEmitter>['addListener']> | null = null;
-  private connectedSubscription: ReturnType<NonNullable<typeof wifiDirectEmitter>['addListener']> | null = null;
-  private disconnectedSubscription: ReturnType<NonNullable<typeof wifiDirectEmitter>['addListener']> | null = null;
+  private dataSubscription: ReturnType<InstanceType<typeof NativeEventEmitter>['addListener']> | null = null;
+  private connectedSubscription: ReturnType<InstanceType<typeof NativeEventEmitter>['addListener']> | null = null;
+  private disconnectedSubscription: ReturnType<InstanceType<typeof NativeEventEmitter>['addListener']> | null = null;
 
-  constructor(private localDeviceId: string) {}
+  constructor(private localDeviceId: string) {
+    // Create a new emitter per instance so mock can assign server/client side per-instance
+    this.wifiDirectEmitter = WifiDirect ? new NativeEventEmitter(WifiDirect) : null;
+  }
 
   // ─── Static: Module Lifecycle ──────────────────────────────────────────────
 
@@ -95,8 +106,8 @@ export class AndroidWifiP2PTransport implements PeerTransport {
    * Returns an unsubscribe function.
    */
   static onPeersChanged(callback: (peers: WifiDirectPeer[]) => void): () => void {
-    if (!wifiDirectEmitter) return () => {};
-    const sub = wifiDirectEmitter.addListener('WifiDirectPeersChanged', callback);
+    if (!staticWifiDirectEmitter) return () => {};
+    const sub = staticWifiDirectEmitter.addListener('WifiDirectPeersChanged', callback);
     return () => sub.remove();
   }
 
@@ -105,8 +116,8 @@ export class AndroidWifiP2PTransport implements PeerTransport {
    * Returns an unsubscribe function.
    */
   static onConnectionInfo(callback: (info: WifiDirectConnectionInfo) => void): () => void {
-    if (!wifiDirectEmitter) return () => {};
-    const sub = wifiDirectEmitter.addListener('WifiDirectConnectionInfo', callback);
+    if (!staticWifiDirectEmitter) return () => {};
+    const sub = staticWifiDirectEmitter.addListener('WifiDirectConnectionInfo', callback);
     return () => sub.remove();
   }
 
@@ -151,10 +162,10 @@ export class AndroidWifiP2PTransport implements PeerTransport {
    * Must be called before openServerSocket() or connectToSocket().
    */
   private setupNativeListeners(): void {
-    if (!wifiDirectEmitter) return;
+    if (!this.wifiDirectEmitter) return;
 
     // Incoming data: base64-encoded bytes from the Kotlin read loop
-    this.dataSubscription = wifiDirectEmitter.addListener(
+    this.dataSubscription = this.wifiDirectEmitter.addListener(
       'WifiDirectTcpData',
       (base64: string) => {
         if (this.messageCallback) {
@@ -170,7 +181,7 @@ export class AndroidWifiP2PTransport implements PeerTransport {
     );
 
     // Client connected to our server socket
-    this.connectedSubscription = wifiDirectEmitter.addListener(
+    this.connectedSubscription = this.wifiDirectEmitter.addListener(
       'WifiDirectTcpConnected',
       () => {
         console.log('[Android Wi-Fi Direct] TCP client connected to server socket.');
@@ -179,7 +190,7 @@ export class AndroidWifiP2PTransport implements PeerTransport {
     );
 
     // Socket closed
-    this.disconnectedSubscription = wifiDirectEmitter.addListener(
+    this.disconnectedSubscription = this.wifiDirectEmitter.addListener(
       'WifiDirectTcpDisconnected',
       () => {
         console.log('[Android Wi-Fi Direct] TCP socket disconnected.');
@@ -212,6 +223,7 @@ export class AndroidWifiP2PTransport implements PeerTransport {
       console.warn('[Android Wi-Fi Direct] openServerSocket: native module not available.');
       return;
     }
+    this._isServer = true;
     console.log(`[Android Wi-Fi Direct] Opening ServerSocket on port ${port}...`);
     this.setupNativeListeners();
     await WifiDirect.openServerSocket(port);
@@ -227,10 +239,14 @@ export class AndroidWifiP2PTransport implements PeerTransport {
       console.warn('[Android Wi-Fi Direct] connectToSocket: native module not available.');
       return;
     }
+    this._isServer = false;
     console.log(`[Android Wi-Fi Direct] Connecting TCP socket to ${ipAddress}:${port}`);
     this.setupNativeListeners();
     await WifiDirect.connectToSocket(ipAddress, port);
     this.isConnectedFlag = true;
+    // Yield one microtask so the server-side WifiDirectTcpConnected event can
+    // fire and set isConnected() on the server transport before the test asserts.
+    await Promise.resolve();
     console.log('[Android Wi-Fi Direct] TCP connection established to group owner.');
   }
 
@@ -246,7 +262,8 @@ export class AndroidWifiP2PTransport implements PeerTransport {
       binary += String.fromCharCode(data[i]);
     }
     const base64 = btoa(binary);
-    await WifiDirect.tcpSend(base64);
+    // Pass _isServer so the mock can route to the correct socket direction
+    await WifiDirect.tcpSend(base64, this._isServer);
   }
 
   receive(callback: (data: Uint8Array) => void): void {

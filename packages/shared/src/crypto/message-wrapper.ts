@@ -59,12 +59,19 @@ export function encryptAndSign(
   const dataToSign = concatUint8Arrays([encrypted.ciphertext, encrypted.iv, encrypted.tag]);
   const signature = sign(dataToSign, senderPrivateKeyHex);
 
+  // Convert hex string → Uint8Array without Buffer (works in Hermes)
+  const hexStr = senderPublicKeyHex;
+  const senderPublicKeyBytes = new Uint8Array(hexStr.length / 2);
+  for (let i = 0; i < senderPublicKeyBytes.length; i++) {
+    senderPublicKeyBytes[i] = parseInt(hexStr.slice(i * 2, i * 2 + 2), 16);
+  }
+
   return {
     payload: encrypted.ciphertext,
     iv: encrypted.iv,
     tag: encrypted.tag,
     signature,
-    sender_public_key: Buffer.from(senderPublicKeyHex, 'hex'),
+    sender_public_key: senderPublicKeyBytes,
     content_hash,
   };
 }
@@ -83,7 +90,10 @@ export function verifyAndDecrypt(
   packet: EncryptedPacket,
   recipientPrivateKeyHex: string
 ): Uint8Array {
-  const senderPublicKeyHex = Buffer.from(packet.sender_public_key).toString('hex');
+  // Convert Uint8Array → hex string without Buffer (works in Hermes)
+  const senderPublicKeyHex = Array.from(packet.sender_public_key)
+    .map((b) => b.toString(16).padStart(2, '0'))
+    .join('');
 
   // 1. Verify signature over (ciphertext || iv || tag)
   const signedData = concatUint8Arrays([packet.payload, packet.iv, packet.tag]);

@@ -68,51 +68,25 @@ export class BleScanner {
     this.bleManager = new BleManager();
   }
 
-  /**
-   * Starts BLE scanning with a 5-second interval and a 2-second active window
-   * to conserve battery power on mobile hardware.
-   *
-   * Filters on DISASTER_P2P_SERVICE_UUID so only app peers are surfaced.
-   * On advertisement received, manufacturer data bytes are unpacked via
-   * unpackAdvertisementPayload() and delivered to the onPeerDiscovered callback.
-   */
   startScanning(): void {
     if (this.isScanning) return;
     this.isScanning = true;
-    console.log('[BLE Scanner] Scan loop started: 5s interval, 2s window');
+    console.log('[BLE Scanner] Continuous scanning started.');
 
-    const startScanWindow = () => {
-      console.log('[BLE Scanner] Scanning active window started (2 seconds)...');
-
-      // Start real BLE scan, filtered to our disaster P2P service UUID
-      this.bleManager.startDeviceScan(
-        [DISASTER_P2P_SERVICE_UUID],
-        { allowDuplicates: false },
-        (error, device) => {
-          if (error) {
-            console.error('[BLE Scanner] Scan error:', error);
-            return;
-          }
-          if (device) {
-            this.handleDiscoveredDevice(device);
-          }
+    // Start BLE scan, filtered to our service UUID
+    this.bleManager.startDeviceScan(
+      [DISASTER_P2P_SERVICE_UUID],
+      { allowDuplicates: false },
+      (error, device) => {
+        if (error) {
+          console.error('[BLE Scanner] Scan error:', error);
+          return;
         }
-      );
-
-      // Stop scanning after the 2-second window
-      this.windowTimer = setTimeout(() => {
-        this.bleManager.stopDeviceScan();
-        console.log('[BLE Scanner] Scanning active window finished. Entering sleep mode...');
-      }, 2000);
-    };
-
-    // Run first scan window immediately
-    startScanWindow();
-
-    // Schedule subsequent scan windows every 5 seconds
-    this.scanTimer = setInterval(() => {
-      startScanWindow();
-    }, 5000);
+        if (device) {
+          this.handleDiscoveredDevice(device);
+        }
+      }
+    );
   }
 
   /**
@@ -123,15 +97,6 @@ export class BleScanner {
     this.isScanning = false;
 
     this.bleManager.stopDeviceScan();
-
-    if (this.scanTimer) {
-      clearInterval(this.scanTimer);
-      this.scanTimer = null;
-    }
-    if (this.windowTimer) {
-      clearTimeout(this.windowTimer);
-      this.windowTimer = null;
-    }
     console.log('[BLE Scanner] Scanning stopped.');
   }
 
@@ -146,7 +111,11 @@ export class BleScanner {
       const rawBase64 = device.manufacturerData;
       if (!rawBase64) return;
 
-      const rawBytes = new Uint8Array(Buffer.from(rawBase64, 'base64'));
+      const binary = atob(rawBase64);
+      const rawBytes = new Uint8Array(binary.length);
+      for (let i = 0; i < binary.length; i++) {
+        rawBytes[i] = binary.charCodeAt(i);
+      }
 
       // Manufacturer data starts with a 2-byte company ID prefix — skip it
       // to reach our 25-byte custom payload
