@@ -39,10 +39,14 @@ function AppWithServices() {
   );
 }
 
+import { SafeAreaProvider } from 'react-native-safe-area-context';
+
 export default function RootLayout() {
   return (
     <Provider store={store}>
-      <AppWithServices />
+      <SafeAreaProvider>
+        <AppWithServices />
+      </SafeAreaProvider>
     </Provider>
   );
 }

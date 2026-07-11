@@ -3,7 +3,6 @@ import {
   View,
   Text,
   StyleSheet,
-  SafeAreaView,
   FlatList,
   TextInput,
   TouchableOpacity,
@@ -12,6 +11,7 @@ import {
   Platform,
   ActivityIndicator,
 } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { useFocusEffect } from '@react-navigation/native';
 import { useService } from '../../hooks/useService';
@@ -160,7 +160,11 @@ export default function ChatScreen({ route, navigation }: any) {
   };
 
   return (
-    <View style={styles.container}>
+    <KeyboardAvoidingView
+      behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+      style={styles.container}
+      keyboardVerticalOffset={Platform.OS === 'ios' ? 90 : 0}
+    >
       <StatusBar barStyle="light-content" backgroundColor="#000000" />
 
       <SafeAreaView style={styles.headerWrapper}>
@@ -210,11 +214,7 @@ export default function ChatScreen({ route, navigation }: any) {
         />
       )}
 
-      <KeyboardAvoidingView
-        behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-        style={styles.inputWrapper}
-        keyboardVerticalOffset={0}
-      >
+      <View style={styles.inputWrapper}>
         <SafeAreaView edges={['bottom']} style={styles.inputSafeArea}>
           <View style={styles.inputContainer}>
             <TextInput
@@ -239,8 +239,8 @@ export default function ChatScreen({ route, navigation }: any) {
             </TouchableOpacity>
           </View>
         </SafeAreaView>
-      </KeyboardAvoidingView>
-    </View>
+      </View>
+    </KeyboardAvoidingView>
   );
 }
 
@@ -307,10 +307,6 @@ const styles = StyleSheet.create({
     lineHeight: 22,
   },
   inputWrapper: {
-    position: 'absolute',
-    left: 0,
-    right: 0,
-    bottom: 0,
     backgroundColor: '#000000',
   },
   inputSafeArea: {
@@ -318,7 +314,7 @@ const styles = StyleSheet.create({
   },
   messageList: {
     paddingVertical: 12,
-    paddingBottom: 90,
+    paddingBottom: 16,
   },
   messageContainer: {
     flexDirection: 'row',

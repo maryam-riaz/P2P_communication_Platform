@@ -109,7 +109,11 @@ export function useInitializeServices() {
         // Instantiate Phase 2 BLE scanning & advertising
         const pubKeyHash = publicKey.slice(0, 8); // 4-byte hash (8 hex chars)
         currentAdvertiser = new BleAdvertiser(deviceId, role, pubKeyHash);
-        await currentAdvertiser.startAdvertising();
+        try {
+          await currentAdvertiser.startAdvertising();
+        } catch (err) {
+          console.warn('[P2P Bootstrap] Failed to start BLE advertising (check if Bluetooth is enabled):', err);
+        }
 
         // Instantiate Phase 2 Android Wifi Direct
         currentRawTransport = new AndroidWifiP2PTransport(deviceId);
@@ -143,7 +147,11 @@ export function useInitializeServices() {
             }
           }
         });
-        currentScanner.startScanning();
+        try {
+          currentScanner.startScanning();
+        } catch (err) {
+          console.warn('[P2P Bootstrap] Failed to start BLE scanning (check if Bluetooth is enabled):', err);
+        }
 
         // Wire up SecureTransport receive callback
         currentSecureTransport.receive(async (plaintext) => {

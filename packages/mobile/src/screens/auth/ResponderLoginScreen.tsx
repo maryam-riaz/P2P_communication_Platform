@@ -5,10 +5,10 @@ import {
   TextInput,
   TouchableOpacity,
   StyleSheet,
-  SafeAreaView,
   StatusBar,
   Alert,
 } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
 import { useDispatch } from 'react-redux';
 import { login } from '../../redux/slices/authSlice';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
