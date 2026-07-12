@@ -1,9 +1,9 @@
 import { Database } from '@nozbe/watermelondb';
 import * as Location from 'expo-location';
 import { MobileRepository } from '../db/repository';
-import { KnownPeer, LocationLog, LocalUser } from '../db/models';
-import { Observable, Subject, map } from 'rxjs';
-
+import { KnownPeer, LocationLog } from '../db/models';
+import { Observable, Subject, map, combineLatest, startWith } from 'rxjs';
+import { ChatService } from './ChatService';
 
 export interface PeerPin {
   deviceId: string;
@@ -11,15 +11,36 @@ export interface PeerPin {
   lat: number | null;
   lng: number | null;
   displayName: string;
+  rssi: number;
 }
 
 export class MapService {
   private repository: MobileRepository;
   private locationSubscription: Location.LocationSubscription | null = null;
   private myLocationSubject = new Subject<{ latitude: number; longitude: number; accuracy: number }>();
+  private chatService: ChatService | null = null;
+
+  // Ephemeral RSSI storage to avoid write-heavy database churn
+  private peerRssiMap = new Map<string, number>();
+  private peerLastSeenMap = new Map<string, number>();
+  private rssiUpdateSubject = new Subject<void>();
 
   constructor(private db: Database) {
     this.repository = new MobileRepository(db);
+  }
+
+  setChatService(chatService: ChatService) {
+    this.chatService = chatService;
+  }
+
+  updatePeerRssi(deviceId: string, rssi: number): void {
+    this.peerRssiMap.set(deviceId, rssi);
+    this.peerLastSeenMap.set(deviceId, Date.now());
+    this.rssiUpdateSubject.next();
+  }
+
+  getPeerRssi(deviceId: string): number {
+    return this.peerRssiMap.get(deviceId) ?? -100;
   }
 
   /**
@@ -32,14 +53,40 @@ export class MapService {
         throw new Error('Location permission denied');
       }
 
-      // Initial position fetch
-      const pos = await Location.getCurrentPositionAsync({
-        accuracy: Location.Accuracy.Balanced,
-      });
+      // Try initial position fetch
+      let coords: { latitude: number; longitude: number; accuracy: number } | null = null;
+      try {
+        const pos = await Location.getCurrentPositionAsync({
+          accuracy: Location.Accuracy.Balanced,
+        });
+        coords = {
+          latitude: pos.coords.latitude,
+          longitude: pos.coords.longitude,
+          accuracy: pos.coords.accuracy ?? 0,
+        };
+      } catch (posErr) {
+        console.warn('[MapService] getCurrentPositionAsync failed, trying last known position:', posErr);
+        try {
+          const lastPos = await Location.getLastKnownPositionAsync();
+          if (lastPos) {
+            coords = {
+              latitude: lastPos.coords.latitude,
+              longitude: lastPos.coords.longitude,
+              accuracy: lastPos.coords.accuracy ?? 0,
+            };
+          }
+        } catch (lastPosErr) {
+          console.warn('[MapService] getLastKnownPositionAsync also failed:', lastPosErr);
+        }
+      }
 
-      await this.handleLocationUpdate(pos.coords);
+      if (coords) {
+        await this.handleLocationUpdate(coords);
+      } else {
+        console.warn('[MapService] Could not resolve initial location. Falling back to default region.');
+      }
 
-      // Watch position every 10 seconds
+      // Watch position every 10 seconds (regardless of whether initial fetch succeeded or failed)
       this.locationSubscription = await Location.watchPositionAsync(
         {
           accuracy: Location.Accuracy.Balanced,
@@ -47,7 +94,11 @@ export class MapService {
           distanceInterval: 5,   // 5 meters
         },
         (loc) => {
-          this.handleLocationUpdate(loc.coords);
+          this.handleLocationUpdate({
+            latitude: loc.coords.latitude,
+            longitude: loc.coords.longitude,
+            accuracy: loc.coords.accuracy ?? 0,
+          });
         }
       );
     } catch (e: any) {
@@ -75,16 +126,39 @@ export class MapService {
 
   /**
    * Returns a live-updating stream of all discovered known peer locations mapped for the map pins.
+   * Emits whenever the local peers DB table changes OR whenever BLE updates a peer's RSSI.
    */
   observePeerLocations(): Observable<PeerPin[]> {
-    return this.db.get<KnownPeer>('known_peers').query().observe().pipe(
-      map((peers) => {
-        return peers.map((p) => {
-          const rawPeer = p._raw as any;
-          let lat: number | null = null;
-          let lng: number | null = null;
-          
-          if (rawPeer.last_known_location && rawPeer.last_known_location !== '') {
+    const peers$ = this.db.get<KnownPeer>('known_peers').query().observe();
+    const rssiTrigger$ = this.rssiUpdateSubject.asObservable().pipe(startWith(null));
+
+    return combineLatest([peers$, rssiTrigger$]).pipe(
+      map(([peers]) => {
+        const cutoff = Date.now() - 30000; // 30 seconds active cutoff
+        
+        // De-duplicate peers by device_id to solve key warnings and phantom peer counts
+        const seen = new Set<string>();
+        const uniquePeers: KnownPeer[] = [];
+        for (const p of peers) {
+          const devId = (p._raw as any).device_id;
+          if (devId && !seen.has(devId)) {
+            seen.add(devId);
+            uniquePeers.push(p);
+          }
+        }
+
+        return uniquePeers
+          .filter((p) => {
+            const rawPeer = p._raw as any;
+            const lastSeen = this.peerLastSeenMap.get(rawPeer.device_id) ?? rawPeer.last_seen ?? 0;
+            return lastSeen > cutoff;
+          })
+          .map((p) => {
+            const rawPeer = p._raw as any;
+            let lat: number | null = null;
+            let lng: number | null = null;
+            
+            if (rawPeer.last_known_location && rawPeer.last_known_location !== '') {
             try {
               const parsed = JSON.parse(rawPeer.last_known_location);
               lat = parsed.lat;
@@ -94,12 +168,15 @@ export class MapService {
             }
           }
 
+          const rssi = this.peerRssiMap.get(rawPeer.device_id) ?? -100;
+
           return {
             deviceId: rawPeer.device_id,
             role: rawPeer.role,
             lat,
             lng,
             displayName: rawPeer.display_name || rawPeer.device_id.slice(0, 8),
+            rssi,
           };
         });
       })
@@ -115,7 +192,9 @@ export class MapService {
 
     const localUser = await this.repository.getLocalUser();
     if (localUser) {
-      const myDeviceId = localUser._raw.device_id as string;
+      const myDeviceId = (localUser._raw as any).device_id as string;
+      
+      // 1. Log coordinates locally
       await this.repository.logLocation({
         deviceId: myDeviceId,
         lat: coords.latitude,
@@ -123,6 +202,28 @@ export class MapService {
         accuracy: coords.accuracy,
         source: 'gps',
       });
+
+      // 2. Share coordinates with all active P2P sockets
+      if (this.chatService) {
+        const activeTransports = this.chatService.getAllActiveTransports();
+        for (const [peerId, transport] of activeTransports.entries()) {
+          if (transport.isHandshakeComplete()) {
+            try {
+              const payload = {
+                type: 'location_share',
+                senderId: myDeviceId,
+                lat: coords.latitude,
+                lng: coords.longitude,
+                timestamp: Date.now()
+              };
+              await transport.send(JSON.stringify(payload));
+              console.log(`[MapService] Broadcasted coordinate update to peer ${peerId}`);
+            } catch (err) {
+              console.warn(`[MapService] Failed to share location with peer ${peerId}:`, err);
+            }
+          }
+        }
+      }
     }
   }
 }

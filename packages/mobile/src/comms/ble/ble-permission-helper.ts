@@ -18,12 +18,18 @@ export async function requestBlePermissions(): Promise<boolean> {
 
   if (androidVersion >= 31) {
     // Android 12+ — request new granular Bluetooth permissions
-    const results = await PermissionsAndroid.requestMultiple([
+    const permissions = [
       PermissionsAndroid.PERMISSIONS.BLUETOOTH_SCAN,
       PermissionsAndroid.PERMISSIONS.BLUETOOTH_CONNECT,
       PermissionsAndroid.PERMISSIONS.BLUETOOTH_ADVERTISE,
       PermissionsAndroid.PERMISSIONS.ACCESS_FINE_LOCATION,
-    ]);
+    ];
+
+    if (androidVersion >= 33) {
+      permissions.push('android.permission.NEARBY_WIFI_DEVICES' as any);
+    }
+
+    const results = await PermissionsAndroid.requestMultiple(permissions);
 
     const allGranted = Object.values(results).every(
       (status) => status === PermissionsAndroid.RESULTS.GRANTED

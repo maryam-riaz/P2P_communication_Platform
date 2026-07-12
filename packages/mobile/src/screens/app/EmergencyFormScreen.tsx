@@ -55,9 +55,10 @@ export default function EmergencyFormScreen() {
   const pickFile = async () => {
     try {
       const result = await DocumentPicker.getDocumentAsync({ type: '*/*' });
-      if (result.type === 'success') {
-        setAttachments([...attachments, result.name]);
-        Alert.alert('Success', `File "${result.name}" attached`);
+      if (!result.canceled && result.assets && result.assets.length > 0) {
+        const file = result.assets[0];
+        setAttachments([...attachments, file.name]);
+        Alert.alert('Success', `File "${file.name}" attached`);
       }
     } catch (err) {
       console.error(err);

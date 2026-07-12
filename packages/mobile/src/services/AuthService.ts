@@ -61,7 +61,7 @@ export class AuthService {
   async logout(): Promise<void> {
     const user = await this.getCurrentUser();
     if (user) {
-      const deviceId = user._raw.device_id as string;
+      const deviceId = (user._raw as any).device_id as string;
       await SecureStore.deleteItemAsync(`private_key_${deviceId}`);
     }
     

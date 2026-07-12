@@ -73,10 +73,11 @@ export class BleScanner {
     this.isScanning = true;
     console.log('[BLE Scanner] Continuous scanning started.');
 
-    // Start BLE scan, filtered to our service UUID
+    // Start BLE scan. We pass null filter to bypass Android's 128-bit UUID filtering bugs on some devices,
+    // and use allowDuplicates: true to ensure the map gets real-time signal strength (RSSI) updates.
     this.bleManager.startDeviceScan(
-      [DISASTER_P2P_SERVICE_UUID],
-      { allowDuplicates: false },
+      null,
+      { allowDuplicates: true },
       (error, device) => {
         if (error) {
           console.error('[BLE Scanner] Scan error:', error);
@@ -117,12 +118,13 @@ export class BleScanner {
         rawBytes[i] = binary.charCodeAt(i);
       }
 
-      // Manufacturer data starts with a 2-byte company ID prefix — skip it
-      // to reach our 25-byte custom payload
-      const payloadStart = rawBytes.length > 25 ? rawBytes.length - 25 : 0;
-      const payload = rawBytes.subarray(payloadStart);
-
-      this.onAdvertisementReceived(payload, device.rssi ?? -100);
+      // Check if advertisement starts with our test/development company ID (0xFFFF)
+      // and is exactly 27 bytes (2 bytes company ID + 25 bytes custom payload)
+      if (rawBytes.length === 27 && rawBytes[0] === 0xFF && rawBytes[1] === 0xFF) {
+        console.log(`[BLE Scanner] Match found! MAC: ${device.id}, RSSI: ${device.rssi}`);
+        const payload = rawBytes.subarray(2); // Skip company ID
+        this.onAdvertisementReceived(payload, device.rssi ?? -100);
+      }
     } catch (error) {
       console.error('[BLE Scanner] Error parsing discovered device:', error);
     }

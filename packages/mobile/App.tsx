@@ -1,3 +1,4 @@
+import './src/utils/polyfills';
 import React, { useEffect, useState } from 'react';
 import { Provider, useSelector, useDispatch } from 'react-redux';
 import { store } from './src/redux/store';

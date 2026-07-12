@@ -1,7 +1,24 @@
 import { appSchema, tableSchema } from '@nozbe/watermelondb';
+import { schemaMigrations, addColumns } from '@nozbe/watermelondb/Schema/migrations';
+
+export const localDbMigrations = schemaMigrations({
+  migrations: [
+    {
+      toVersion: 2,
+      steps: [
+        addColumns({
+          table: 'known_peers',
+          columns: [
+            { name: 'display_name', type: 'string', isOptional: true },
+          ],
+        }),
+      ],
+    },
+  ],
+});
 
 export const localDbSchema = appSchema({
-  version: 1,
+  version: 2,
   tables: [
     tableSchema({
       name: 'local_user',
@@ -19,6 +36,7 @@ export const localDbSchema = appSchema({
         { name: 'device_id', type: 'string', isIndexed: true },
         { name: 'public_key', type: 'string' },
         { name: 'role', type: 'string' }, // 'user' | 'responder' | 'admin'
+        { name: 'display_name', type: 'string', isOptional: true },
         { name: 'last_seen', type: 'number', isIndexed: true },
         { name: 'last_known_location', type: 'string' }, // serialized location
         { name: 'trust_status', type: 'string' }, // 'trusted' | 'untrusted' | 'pending'

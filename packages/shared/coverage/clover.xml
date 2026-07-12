@@ -1,10 +1,10 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<coverage generated="1783434923303" clover="3.2.0">
-  <project timestamp="1783434923303" name="All files">
-    <metrics statements="114" coveredstatements="114" conditionals="39" coveredconditionals="36" methods="16" coveredmethods="16" elements="169" coveredelements="166" complexity="0" loc="114" ncloc="114" packages="2" files="6" classes="6"/>
+<coverage generated="1783786731554" clover="3.2.0">
+  <project timestamp="1783786731555" name="All files">
+    <metrics statements="119" coveredstatements="119" conditionals="39" coveredconditionals="36" methods="17" coveredmethods="17" elements="175" coveredelements="172" complexity="0" loc="119" ncloc="119" packages="2" files="6" classes="6"/>
     <package name="crypto">
-      <metrics statements="77" coveredstatements="77" conditionals="3" coveredconditionals="3" methods="12" coveredmethods="12"/>
-      <file name="aes-gcm.ts" path="C:\Users\PMLS\Desktop\CSN\Week 2\Emergency_Application_v6\packages\shared\src\crypto\aes-gcm.ts">
+      <metrics statements="82" coveredstatements="82" conditionals="3" coveredconditionals="3" methods="13" coveredmethods="13"/>
+      <file name="aes-gcm.ts" path="C:\AppV6\packages\shared\src\crypto\aes-gcm.ts">
         <metrics statements="18" coveredstatements="18" conditionals="2" coveredconditionals="2" methods="2" coveredmethods="2"/>
         <line num="1" count="1" type="stmt"/>
         <line num="13" count="1" type="stmt"/>
@@ -25,7 +25,7 @@
         <line num="54" count="2" type="stmt"/>
         <line num="56" count="2" type="stmt"/>
       </file>
-      <file name="ecdh.ts" path="C:\Users\PMLS\Desktop\CSN\Week 2\Emergency_Application_v6\packages\shared\src\crypto\ecdh.ts">
+      <file name="ecdh.ts" path="C:\AppV6\packages\shared\src\crypto\ecdh.ts">
         <metrics statements="12" coveredstatements="12" conditionals="0" coveredconditionals="0" methods="3" coveredmethods="3"/>
         <line num="1" count="1" type="stmt"/>
         <line num="12" count="1" type="stmt"/>
@@ -40,7 +40,7 @@
         <line num="47" count="5" type="stmt"/>
         <line num="48" count="5" type="stmt"/>
       </file>
-      <file name="ecdsa.ts" path="C:\Users\PMLS\Desktop\CSN\Week 2\Emergency_Application_v6\packages\shared\src\crypto\ecdsa.ts">
+      <file name="ecdsa.ts" path="C:\AppV6\packages\shared\src\crypto\ecdsa.ts">
         <metrics statements="13" coveredstatements="13" conditionals="0" coveredconditionals="0" methods="2" coveredmethods="2"/>
         <line num="1" count="1" type="stmt"/>
         <line num="8" count="1" type="stmt"/>
@@ -56,8 +56,8 @@
         <line num="35" count="5" type="stmt"/>
         <line num="38" count="1" type="stmt"/>
       </file>
-      <file name="message-wrapper.ts" path="C:\Users\PMLS\Desktop\CSN\Week 2\Emergency_Application_v6\packages\shared\src\crypto\message-wrapper.ts">
-        <metrics statements="29" coveredstatements="29" conditionals="1" coveredconditionals="1" methods="4" coveredmethods="4"/>
+      <file name="message-wrapper.ts" path="C:\AppV6\packages\shared\src\crypto\message-wrapper.ts">
+        <metrics statements="34" coveredstatements="34" conditionals="1" coveredconditionals="1" methods="5" coveredmethods="5"/>
         <line num="1" count="1" type="stmt"/>
         <line num="2" count="1" type="stmt"/>
         <line num="3" count="1" type="stmt"/>
@@ -77,18 +77,23 @@
         <line num="56" count="2" type="stmt"/>
         <line num="59" count="2" type="stmt"/>
         <line num="60" count="2" type="stmt"/>
-        <line num="62" count="2" type="stmt"/>
-        <line num="82" count="1" type="stmt"/>
-        <line num="86" count="2" type="stmt"/>
-        <line num="89" count="2" type="stmt"/>
-        <line num="90" count="2" type="stmt"/>
-        <line num="91" count="2" type="cond" truecount="1" falsecount="0"/>
-        <line num="92" count="1" type="stmt"/>
-        <line num="96" count="1" type="stmt"/>
-        <line num="97" count="1" type="stmt"/>
-        <line num="100" count="1" type="stmt"/>
+        <line num="63" count="2" type="stmt"/>
+        <line num="64" count="2" type="stmt"/>
+        <line num="65" count="2" type="stmt"/>
+        <line num="66" count="182" type="stmt"/>
+        <line num="69" count="2" type="stmt"/>
+        <line num="89" count="1" type="stmt"/>
+        <line num="94" count="2" type="stmt"/>
+        <line num="95" count="182" type="stmt"/>
+        <line num="99" count="2" type="stmt"/>
+        <line num="100" count="2" type="stmt"/>
+        <line num="101" count="2" type="cond" truecount="1" falsecount="0"/>
+        <line num="102" count="1" type="stmt"/>
+        <line num="106" count="1" type="stmt"/>
+        <line num="107" count="1" type="stmt"/>
+        <line num="110" count="1" type="stmt"/>
       </file>
-      <file name="sha256.ts" path="C:\Users\PMLS\Desktop\CSN\Week 2\Emergency_Application_v6\packages\shared\src\crypto\sha256.ts">
+      <file name="sha256.ts" path="C:\AppV6\packages\shared\src\crypto\sha256.ts">
         <metrics statements="5" coveredstatements="5" conditionals="0" coveredconditionals="0" methods="1" coveredmethods="1"/>
         <line num="1" count="1" type="stmt"/>
         <line num="7" count="1" type="stmt"/>
@@ -99,7 +104,7 @@
     </package>
     <package name="sync">
       <metrics statements="37" coveredstatements="37" conditionals="36" coveredconditionals="33" methods="4" coveredmethods="4"/>
-      <file name="merge-logic.ts" path="C:\Users\PMLS\Desktop\CSN\Week 2\Emergency_Application_v6\packages\shared\src\sync\merge-logic.ts">
+      <file name="merge-logic.ts" path="C:\AppV6\packages\shared\src\sync\merge-logic.ts">
         <metrics statements="37" coveredstatements="37" conditionals="36" coveredconditionals="33" methods="4" coveredmethods="4"/>
         <line num="19" count="1" type="stmt"/>
         <line num="20" count="3" type="stmt"/>

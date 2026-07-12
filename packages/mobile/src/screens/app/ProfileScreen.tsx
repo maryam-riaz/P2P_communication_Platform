@@ -79,7 +79,7 @@ export default function ProfileScreen({ navigation }: any) {
       <View style={styles.profileCard}>
         <View style={[styles.avatar, { backgroundColor: `${getRoleColor()}20` }]}>
           <MaterialCommunityIcons
-            name={getRoleIcon()}
+            name={getRoleIcon() as any}
             size={48}
             color={getRoleColor()}
           />

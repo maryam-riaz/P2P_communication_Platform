@@ -13,10 +13,28 @@ import { RootState } from '../../redux/store';
 import { setUserLocation, setNearbyUsers, setNearbyRescuers } from '../../redux/slices/mapSlice';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { useService } from '../../hooks/useService';
-import { MapService } from '../../services/MapService';
+import { MapService, PeerPin } from '../../services/MapService';
 import { SosService } from '../../services/SosService';
 import { ServiceContext } from '../../context/ServiceContext';
 import { MobileRepository } from '../../db/repository';
+
+const SONAR_SIZE = 280;
+const SONAR_RADIUS = SONAR_SIZE / 2;
+
+function rssiToDistance(rssi: number): number {
+  const A = -59;
+  const n = 2.5;
+  if (rssi >= 0) return 0.1;
+  return Math.pow(10, (A - rssi) / (10 * n));
+}
+
+function getStableAngleForPeer(deviceId: string): number {
+  let hash = 0;
+  for (let i = 0; i < deviceId.length; i++) {
+    hash = deviceId.charCodeAt(i) + ((hash << 5) - hash);
+  }
+  return Math.abs(hash % 360) * (Math.PI / 180);
+}
 
 export default function MapScreen({ navigation }: any) {
   const dispatch = useDispatch();
@@ -28,6 +46,7 @@ export default function MapScreen({ navigation }: any) {
   const sosService = useService(SosService);
   const services = useContext(ServiceContext);
   
+  const [rawPeers, setRawPeers] = useState<PeerPin[]>([]);
   const [sosPins, setSosPins] = useState<any[]>([]);
   const [peerCount, setPeerCount] = useState(0);
 
@@ -46,6 +65,10 @@ export default function MapScreen({ navigation }: any) {
         role,
         trustStatus: 'trusted'
       });
+
+      // Update RSSI randomly between -40 (very close) and -90 (far)
+      const mockRssi = -40 - Math.floor(Math.random() * 50);
+      mapService.updatePeerRssi(mockDeviceId, mockRssi);
 
       const baseLat = userLocation?.latitude || 37.7749;
       const baseLng = userLocation?.longitude || -122.4194;
@@ -83,6 +106,7 @@ export default function MapScreen({ navigation }: any) {
 
     // 3. Subscribe to discovered peers on the Map
     const peerSub = mapService.observePeerLocations().subscribe((peers) => {
+      setRawPeers(peers);
       setPeerCount(peers.length);
       
       const victims = peers.filter(p => p.role === 'user').map(p => ({
@@ -128,16 +152,78 @@ export default function MapScreen({ navigation }: any) {
         </TouchableOpacity>
       </SafeAreaView>
 
-      {/* Web Fallback Interactive Grid Map Representation */}
+      {/* Web Sonar Radar Display */}
       <View style={styles.mapPlaceholder}>
-        <MaterialCommunityIcons name="map-marker-radius" size={48} color="#FF8C42" />
-        <Text style={styles.placeholderTitle}>Web Map Interface</Text>
-        <Text style={styles.placeholderSubtitle}>
-          {userLocation 
-            ? `Your Coordinates: ${userLocation.latitude.toFixed(4)}, ${userLocation.longitude.toFixed(4)}`
-            : "Locating user..."}
-        </Text>
+        <Text style={styles.placeholderTitle}>Web Sonar Grid Visualizer</Text>
+        <Text style={styles.placeholderSubtitle}>Relative positions calculated from P2P Signal Strengths</Text>
         
+        {/* Sonar Area */}
+        <View style={styles.sonarScreen}>
+          {/* Static CSS Injection for Radar Sweep and Pulsing animations */}
+          {Platform.OS === 'web' && (
+            <style dangerouslySetInnerHTML={{ __html: `
+              @keyframes sweep {
+                from { transform: rotate(0deg); }
+                to { transform: rotate(360deg); }
+              }
+              @keyframes radar-pulse {
+                0% { transform: scale(0.9); opacity: 0.8; }
+                100% { transform: scale(2.5); opacity: 0; }
+              }
+              .radar-sweep-hand {
+                transform-origin: bottom center;
+                animation: sweep 4s linear infinite;
+              }
+              .pulse-dot {
+                animation: radar-pulse 2s infinite ease-out;
+              }
+            `}} />
+          )}
+
+          {/* Sonar Background Circles */}
+          <View style={[styles.sonarRing, { width: 70, height: 70, borderRadius: 35 }]} />
+          <View style={[styles.sonarRing, { width: 140, height: 140, borderRadius: 70 }]} />
+          <View style={[styles.sonarRing, { width: 210, height: 210, borderRadius: 105 }]} />
+          <View style={[styles.sonarRing, { width: 280, height: 280, borderRadius: 140 }]} />
+          
+          {/* Sonar Axis Lines */}
+          <View style={styles.sonarAxisH} />
+          <View style={styles.sonarAxisV} />
+
+          {/* Sweep Hand */}
+          <div style={StyleSheet.flatten([styles.sweepHand, { height: SONAR_RADIUS }]) as any} className="radar-sweep-hand" />
+
+          {/* Center (Me) Dot */}
+          <View style={[styles.dotMe, { left: SONAR_RADIUS - 6, top: SONAR_RADIUS - 6 }]} />
+
+          {/* Resolved Peer Dots on the Radar Screen */}
+          {rawPeers.map((peer) => {
+            const d = rssiToDistance(peer.rssi);
+            // Map 0m - 100m to 0px - 140px on the radar circle
+            const normD = Math.min((d / 100) * SONAR_RADIUS, SONAR_RADIUS - 10);
+            const angle = getStableAngleForPeer(peer.deviceId);
+            
+            const x = SONAR_RADIUS + normD * Math.cos(angle);
+            const y = SONAR_RADIUS + normD * Math.sin(angle);
+
+            const isResponder = peer.role === 'responder' || peer.role === 'admin';
+            const color = isResponder ? '#E0005C' : '#FF8C42';
+
+            return (
+              <TouchableOpacity
+                key={peer.deviceId}
+                style={[styles.peerDotContainer, { left: x - 15, top: y - 15 }]}
+                onPress={() => handleMarkerPress({ id: peer.deviceId, name: peer.displayName })}
+              >
+                {/* Sonar Pulse Indicator */}
+                <div style={StyleSheet.flatten([styles.pulseDot, { borderColor: color, backgroundColor: color + '1A' }]) as any} className="pulse-dot" />
+                <View style={[styles.dotPeer, { backgroundColor: color }]} />
+                <Text style={styles.peerLabel} numberOfLines={1}>{peer.displayName}</Text>
+              </TouchableOpacity>
+            );
+          })}
+        </View>
+
         <TouchableOpacity
           style={styles.simulateButton}
           onPress={handleSimulatePeer}
@@ -158,12 +244,7 @@ export default function MapScreen({ navigation }: any) {
               <Text style={styles.nodeItemTextResponder}>🛡️ {r.name} (Rescuer)</Text>
             </TouchableOpacity>
           ))}
-          {sosPins.map(sos => (
-            <View key={sos.id} style={styles.nodeItemSos}>
-              <Text style={styles.nodeItemTextSos}>🚨 SOS Alert: {(sos._raw as any).description || 'Urgent assistance required'}</Text>
-            </View>
-          ))}
-          {nearbyUsers.length === 0 && nearbyRescuers.length === 0 && sosPins.length === 0 && (
+          {nearbyUsers.length === 0 && nearbyRescuers.length === 0 && (
             <Text style={styles.placeholderSubtitle}>No mesh node locations broadcasted yet.</Text>
           )}
         </View>
@@ -225,7 +306,7 @@ const styles = StyleSheet.create({
   },
   mapPlaceholder: {
     flex: 1,
-    justifyContent: 'center',
+    justifyContent: 'flex-start',
     alignItems: 'center',
     backgroundColor: '#111111',
     borderWidth: 1,
@@ -233,13 +314,13 @@ const styles = StyleSheet.create({
     margin: 16,
     borderRadius: 12,
     padding: 16,
-    overflow: 'auto',
+    overflow: 'scroll',
   },
   placeholderTitle: {
     color: '#FFF',
     fontSize: 18,
     fontWeight: 'bold',
-    marginTop: 12,
+    marginTop: 8,
   },
   placeholderSubtitle: {
     color: '#666',
@@ -247,8 +328,95 @@ const styles = StyleSheet.create({
     marginTop: 4,
     textAlign: 'center',
   },
+  sonarScreen: {
+    width: SONAR_SIZE,
+    height: SONAR_SIZE,
+    borderRadius: SONAR_RADIUS,
+    backgroundColor: '#050505',
+    borderWidth: 2,
+    borderColor: '#111',
+    marginTop: 20,
+    position: 'relative',
+    justifyContent: 'center',
+    alignItems: 'center',
+    overflow: 'hidden',
+  },
+  sonarRing: {
+    position: 'absolute',
+    borderWidth: 1,
+    borderColor: 'rgba(2, 195, 154, 0.15)',
+    borderStyle: 'dashed',
+  },
+  sonarAxisH: {
+    position: 'absolute',
+    height: 1,
+    width: '100%',
+    backgroundColor: 'rgba(2, 195, 154, 0.1)',
+  },
+  sonarAxisV: {
+    position: 'absolute',
+    width: 1,
+    height: '100%',
+    backgroundColor: 'rgba(2, 195, 154, 0.1)',
+  },
+  sweepHand: {
+    position: 'absolute',
+    width: 2,
+    bottom: SONAR_RADIUS,
+    backgroundColor: 'rgba(2, 195, 154, 0.4)',
+    transformOrigin: 'bottom center',
+    boxShadow: '0 0 10px rgba(2, 195, 154, 0.8)',
+  },
+  dotMe: {
+    position: 'absolute',
+    width: 12,
+    height: 12,
+    borderRadius: 6,
+    backgroundColor: '#02C39A',
+    borderWidth: 2,
+    borderColor: '#FFF',
+    zIndex: 50,
+    boxShadow: '0 0 6px #02C39A',
+  },
+  peerDotContainer: {
+    position: 'absolute',
+    width: 30,
+    height: 30,
+    justifyContent: 'center',
+    alignItems: 'center',
+    zIndex: 10,
+    cursor: 'pointer',
+  },
+  dotPeer: {
+    width: 10,
+    height: 10,
+    borderRadius: 5,
+    borderWidth: 2,
+    borderColor: '#FFF',
+    zIndex: 12,
+  },
+  pulseDot: {
+    position: 'absolute',
+    width: 14,
+    height: 14,
+    borderRadius: 7,
+    borderWidth: 1.5,
+    zIndex: 11,
+  },
+  peerLabel: {
+    position: 'absolute',
+    top: 24,
+    fontSize: 9,
+    color: '#CCC',
+    fontWeight: 'bold',
+    backgroundColor: 'rgba(0,0,0,0.6)',
+    paddingHorizontal: 4,
+    paddingVertical: 1,
+    borderRadius: 4,
+    whiteSpace: 'nowrap',
+  } as any,
   nodeListContainer: {
-    marginTop: 24,
+    marginTop: 20,
     width: '100%',
     maxWidth: 320,
     backgroundColor: '#1A1A1A',
@@ -279,22 +447,9 @@ const styles = StyleSheet.create({
     fontSize: 13,
     fontWeight: '600',
   },
-  nodeItemSos: {
-    backgroundColor: '#3b1c1c',
-    borderColor: '#FF3B30',
-    borderWidth: 1,
-    padding: 10,
-    borderRadius: 6,
-    marginVertical: 4,
-  },
-  nodeItemTextSos: {
-    color: '#FF3B30',
-    fontSize: 12,
-    fontWeight: '600',
-  },
   connectionBadge: {
     position: 'absolute',
-    top: Platform.OS === 'ios' ? 60 : 70,
+    top: 70,
     right: 16,
     backgroundColor: '#1A1A1A',
     paddingHorizontal: 12,
@@ -362,7 +517,8 @@ const styles = StyleSheet.create({
     paddingVertical: 8,
     paddingHorizontal: 16,
     borderRadius: 6,
-    marginTop: 12,
+    marginTop: 16,
+    cursor: 'pointer',
   },
   simulateButtonText: {
     color: '#FFF',

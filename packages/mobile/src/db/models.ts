@@ -17,6 +17,7 @@ export class KnownPeer extends Model {
   @text('device_id') deviceId!: string;
   @text('public_key') publicKey!: string;
   @text('role') role!: string; // 'user' | 'responder' | 'admin'
+  @text('display_name') displayName!: string;
   @field('last_seen') lastSeen!: number;
   @text('last_known_location') lastKnownLocation!: string; // JSON string
   @text('trust_status') trustStatus!: string; // 'trusted' | 'untrusted' | 'pending'

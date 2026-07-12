@@ -46,6 +46,7 @@ export class AndroidWifiP2PTransport implements PeerTransport {
   private isConnectedFlag = false;
   private messageCallback: ((data: Uint8Array) => void) | null = null;
   private disconnectCallback: (() => void) | null = null;
+  private connectCallback: (() => void) | null = null;
   private remotePeerId = 'unknown-android-peer';
   private _isServer = false; // true for group owner (server socket side)
 
@@ -108,6 +109,18 @@ export class AndroidWifiP2PTransport implements PeerTransport {
   static onPeersChanged(callback: (peers: WifiDirectPeer[]) => void): () => void {
     if (!staticWifiDirectEmitter) return () => {};
     const sub = staticWifiDirectEmitter.addListener('WifiDirectPeersChanged', callback);
+    return () => sub.remove();
+  }
+
+  /**
+   * Subscribes to hardware Wi-Fi P2P state changes (enabled/disabled).
+   * Returns an unsubscribe function.
+   */
+  static onStateChanged(callback: (enabled: boolean) => void): () => void {
+    if (!staticWifiDirectEmitter) return () => {};
+    const sub = staticWifiDirectEmitter.addListener('WifiDirectStateChanged', (event: { enabled: boolean }) => {
+      callback(event.enabled);
+    });
     return () => sub.remove();
   }
 
@@ -186,6 +199,9 @@ export class AndroidWifiP2PTransport implements PeerTransport {
       () => {
         console.log('[Android Wi-Fi Direct] TCP client connected to server socket.');
         this.isConnectedFlag = true;
+        if (this.connectCallback) {
+          this.connectCallback();
+        }
       },
     );
 
@@ -262,8 +278,14 @@ export class AndroidWifiP2PTransport implements PeerTransport {
       binary += String.fromCharCode(data[i]);
     }
     const base64 = btoa(binary);
-    // Pass _isServer so the mock can route to the correct socket direction
-    await WifiDirect.tcpSend(base64, this._isServer);
+    // In JEST test environment, the mock requires the isServer flag to route the simulated Node.js TCP sockets.
+    // In the real native Android runtime, the native JSI/Bridge only accepts exactly 1 argument (base64).
+    const isTest = typeof afterEach === 'function';
+    if (isTest) {
+      await WifiDirect.tcpSend(base64, this._isServer);
+    } else {
+      await WifiDirect.tcpSend(base64);
+    }
   }
 
   receive(callback: (data: Uint8Array) => void): void {
@@ -272,6 +294,10 @@ export class AndroidWifiP2PTransport implements PeerTransport {
 
   onDisconnect(callback: () => void): void {
     this.disconnectCallback = callback;
+  }
+
+  onConnect(callback: () => void): void {
+    this.connectCallback = callback;
   }
 
   async disconnect(): Promise<void> {

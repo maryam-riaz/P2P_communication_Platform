@@ -12,7 +12,7 @@
     "pg": "^8.12.0",
     "mongodb": "^6.7.0",
     "redis": "^4.6.14",
-    "shared": "*"
+    "shared": "workspace:*"
   },
   "devDependencies": {
     "@types/pg": "^8.11.6",

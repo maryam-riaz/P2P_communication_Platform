@@ -1,4 +1,6 @@
 packages:
   - 'packages/*'
 allowBuilds:
+  bson: set this to true or false
   unrs-resolver: false
+nodeLinker: hoisted

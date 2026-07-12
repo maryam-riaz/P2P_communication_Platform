@@ -6,7 +6,9 @@
     "test": "pnpm --recursive run test",
     "test:shared": "pnpm --filter shared test",
     "test:mobile": "pnpm --filter mobile test",
-    "test:backend": "pnpm --filter backend test"
+    "test:backend": "pnpm --filter backend test",
+    "android": "expo run:android",
+    "ios": "expo run:ios"
   },
   "devDependencies": {
     "typescript": "^5.5.0",
@@ -16,5 +18,10 @@
   },
   "workspaces": [
     "packages/*"
-  ]
+  ],
+  "dependencies": {
+    "expo": "~54.0.35",
+    "react": "19.1.0",
+    "react-native": "0.81.5"
+  }
 }

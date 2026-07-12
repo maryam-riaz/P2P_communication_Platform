@@ -83,7 +83,7 @@ export default function AdvisorScreen({ navigation }: any) {
                 ]}
               >
                 <MaterialCommunityIcons
-                  name={scenario.icon}
+                  name={scenario.icon as any}
                   size={32}
                   color={scenario.color}
                 />

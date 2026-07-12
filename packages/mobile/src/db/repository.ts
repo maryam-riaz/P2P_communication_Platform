@@ -66,15 +66,38 @@ export class MobileRepository {
     publicKey: string;
     role: string;
     trustStatus: string;
+    displayName?: string;
   }): Promise<KnownPeer> {
-    const existing = await this.getPeer(peerInfo.deviceId);
     return await this.db.write(async () => {
+      const peers = await this.db
+        .get<KnownPeer>('known_peers')
+        .query(Q.where('device_id', peerInfo.deviceId))
+        .fetch();
+      const existing = peers.length > 0 ? peers[0] : null;
+
       if (existing) {
         await existing.update((record) => {
-          raw(record).public_key = peerInfo.publicKey;
-          raw(record).role = peerInfo.role;
-          raw(record).trust_status = peerInfo.trustStatus;
+          const existingRaw = record._raw as any;
+          
+          // Only update trust status if we are upgrading or not downgrading from trusted to pending
+          if (existingRaw.trust_status !== 'trusted' || peerInfo.trustStatus === 'trusted') {
+            raw(record).trust_status = peerInfo.trustStatus;
+          }
+          
+          // Only update public key if new key is a full key, or existing is short or empty
+          if (peerInfo.publicKey.length > 8 || !existingRaw.public_key || existingRaw.public_key.length <= 8) {
+            raw(record).public_key = peerInfo.publicKey;
+          }
+
+          // If incoming role is user but we have a more specific role (responder/admin), keep it
+          if (peerInfo.role !== 'user' || !existingRaw.role || existingRaw.role === 'user') {
+            raw(record).role = peerInfo.role;
+          }
+
           raw(record).last_seen = Date.now();
+          if (peerInfo.displayName) {
+            raw(record).display_name = peerInfo.displayName;
+          }
         });
         return existing;
       } else {
@@ -85,6 +108,7 @@ export class MobileRepository {
           raw(record).trust_status = peerInfo.trustStatus;
           raw(record).last_seen = Date.now();
           raw(record).last_known_location = '';
+          raw(record).display_name = peerInfo.displayName || '';
         });
       }
     });

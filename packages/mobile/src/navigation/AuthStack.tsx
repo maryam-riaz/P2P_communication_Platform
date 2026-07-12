@@ -12,7 +12,6 @@ export default function AuthStack() {
     <Stack.Navigator
       screenOptions={{
         headerShown: false,
-        animationEnabled: true,
       }}
     >
       <Stack.Screen name="RoleSelection" component={RoleSelectionScreen} />

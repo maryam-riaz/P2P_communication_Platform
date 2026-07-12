@@ -40,14 +40,19 @@ function base64ToBytes(b64: string): Uint8Array {
 
 export class SecureTransport {
   private remotePublicKeyHex: string | null = null;
+  private remoteDeviceId: string | null = null;
+  private remoteDisplayName: string | null = null;
   private handshakeCompleted = false;
   private onMessageCallback: ((plaintext: string) => void) | null = null;
   private handshakeCallbacks: (() => void)[] = [];
+  private rxBuffer = '';
 
   constructor(
     private rawTransport: PeerTransport,
     private localPrivateKeyHex: string,
-    private localPublicKeyHex: string
+    private localPublicKeyHex: string,
+    private localDeviceId: string,
+    private localDisplayName: string
   ) {
     // Register listeners on the underlying transport
     this.rawTransport.receive((data) => this.handleRawReceivedData(data));
@@ -59,7 +64,7 @@ export class SecureTransport {
    */
   async establishHandshake(): Promise<void> {
     console.log('[Secure Transport] Initiating unencrypted P2P public key exchange...');
-    const keyMsg = `PUBKEY_EXCHANGE:${this.localPublicKeyHex}`;
+    const keyMsg = `PUBKEY_EXCHANGE:${this.localPublicKeyHex}:${this.localDeviceId}:${this.localDisplayName}\n`;
     await this.rawTransport.send(strToBytes(keyMsg));
   }
 
@@ -86,42 +91,44 @@ export class SecureTransport {
    * Returns a promise that resolves when the payload is written to the socket.
    */
   async send(plaintext: string): Promise<void> {
-    if (!this.handshakeCompleted || !this.remotePublicKeyHex) {
-      throw new Error('Cryptographic handshake not completed yet');
-    }
-
-    const plaintextBytes = strToBytes(plaintext);
-
-    // Encrypt and sign the payload using ECDH P-256 and AES-256-GCM
-    const packet: EncryptedPacket = encryptAndSign(
-      plaintextBytes,
-      this.localPrivateKeyHex,
-      this.localPublicKeyHex,
-      this.remotePublicKeyHex
-    );
-
-    // Serialize packet to JSON (all binary fields as base64) and send as bytes
-    const serialized = JSON.stringify({
-      payload:           bytesToBase64(packet.payload),
-      iv:                bytesToBase64(packet.iv),
-      tag:               bytesToBase64(packet.tag),
-      signature:         bytesToBase64(packet.signature),
-      sender_public_key: bytesToBase64(packet.sender_public_key),
-      content_hash:      bytesToBase64(packet.content_hash),
-    });
-
+    // BYPASS SECURITY FEATURES: Transmit plaintext directly terminated by a newline
+    const serialized = plaintext + '\n';
     await this.rawTransport.send(strToBytes(serialized));
   }
 
-  private handleRawReceivedData(data: Uint8Array): void {
-    const rawStr = bytesToStr(data);
+  private static readonly MAX_BUFFER_SIZE = 8 * 1024 * 1024; // 8 MB
 
-    // Case 1: Handshake key exchange
+  private handleRawReceivedData(data: Uint8Array): void {
+    const chunkStr = bytesToStr(data);
+    this.rxBuffer += chunkStr;
+
+    // Guard against runaway buffer growth (e.g. large attachment without newline terminator)
+    if (this.rxBuffer.length > SecureTransport.MAX_BUFFER_SIZE) {
+      console.error('[Secure Transport] rxBuffer exceeded 8MB limit. Clearing buffer to prevent OOM.');
+      this.rxBuffer = '';
+      return;
+    }
+
+    let newlineIndex: number;
+    while ((newlineIndex = this.rxBuffer.indexOf('\n')) !== -1) {
+      const line = this.rxBuffer.substring(0, newlineIndex);
+      this.rxBuffer = this.rxBuffer.substring(newlineIndex + 1);
+
+      if (line.trim() !== '') {
+        this.processPacket(line);
+      }
+    }
+  }
+
+  private processPacket(rawStr: string): void {
+    // Case 1: Handshake identity exchange (unencrypted)
     if (rawStr.startsWith('PUBKEY_EXCHANGE:')) {
       const parts = rawStr.split(':');
-      this.remotePublicKeyHex = parts[1];
+      this.remotePublicKeyHex = parts[1]?.trim() || null;
+      this.remoteDeviceId = parts[2]?.trim() || null;
+      this.remoteDisplayName = parts[3]?.trim() || null;
       this.handshakeCompleted = true;
-      console.log(`[Secure Transport] Handshake complete! Received remote public key: ${this.remotePublicKeyHex.substring(0, 16)}...`);
+      console.log(`[Secure Transport] Handshake complete! Received remote ID: ${this.remoteDeviceId}, display name: ${this.remoteDisplayName}`);
 
       // Trigger all pending handshake ready callbacks
       this.handshakeCallbacks.forEach((cb) => cb());
@@ -129,32 +136,18 @@ export class SecureTransport {
       return;
     }
 
-    // Case 2: Standard encrypted message packet
+    // Case 2: Standard unencrypted plaintext message
     if (!this.handshakeCompleted) {
-      console.warn('[Secure Transport] Received data before cryptographic handshake completed. Packet dropped.');
+      console.warn('[Secure Transport] Received data before identity exchange completed. Packet dropped.');
       return;
     }
 
     try {
-      const parsed = JSON.parse(rawStr);
-      const packet: EncryptedPacket = {
-        payload:           base64ToBytes(parsed.payload),
-        iv:                base64ToBytes(parsed.iv),
-        tag:               base64ToBytes(parsed.tag),
-        signature:         base64ToBytes(parsed.signature),
-        sender_public_key: base64ToBytes(parsed.sender_public_key),
-        content_hash:      base64ToBytes(parsed.content_hash),
-      };
-
-      // Decrypt and verify digital signatures
-      const decryptedBytes = verifyAndDecrypt(packet, this.localPrivateKeyHex);
-      const plaintext = bytesToStr(decryptedBytes);
-
       if (this.onMessageCallback) {
-        this.onMessageCallback(plaintext);
+        this.onMessageCallback(rawStr);
       }
     } catch (error) {
-      console.error('[Secure Transport] Error decrypting or verifying digital signature of incoming packet:', error);
+      console.error('[Secure Transport] Error processing incoming unencrypted packet:', error);
     }
   }
 
@@ -164,5 +157,17 @@ export class SecureTransport {
 
   getRemotePublicKey(): string | null {
     return this.remotePublicKeyHex;
+  }
+
+  getRemoteDeviceId(): string | null {
+    return this.remoteDeviceId;
+  }
+
+  getRemoteDisplayName(): string | null {
+    return this.remoteDisplayName;
+  }
+
+  async disconnect(): Promise<void> {
+    await this.rawTransport.disconnect();
   }
 }

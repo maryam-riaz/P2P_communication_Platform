@@ -11,6 +11,8 @@ import EmergencyFormScreen from '../screens/app/EmergencyFormScreen';
 import ChatListScreen from '../screens/app/ChatListScreen';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
+
 const Stack = createNativeStackNavigator();
 const Tab = createBottomTabNavigator();
 
@@ -49,7 +51,7 @@ function ChatListStack() {
       initialRouteName="ChatListScreen"
     >
       <Stack.Screen name="ChatListScreen" component={ChatListScreen} />
-      <Stack.Screen name="ChatScreen" component={ChatScreen} />
+      <Stack.Screen name="Chat" component={ChatScreen} />
     </Stack.Navigator>
   );
 }
@@ -62,7 +64,7 @@ function ChatStack() {
       initialRouteName="ChatListScreen"
     >
       <Stack.Screen name="ChatListScreen" component={ChatListScreen} />
-      <Stack.Screen name="ChatScreen" component={ChatScreen} />
+      <Stack.Screen name="Chat" component={ChatScreen} />
     </Stack.Navigator>
   );
 }
@@ -88,6 +90,8 @@ function AdvisorStack() {
 }
 
 export default function AppStack() {
+  const insets = useSafeAreaInsets();
+
   return (
     <Tab.Navigator
       screenOptions={{
@@ -98,15 +102,16 @@ export default function AppStack() {
           backgroundColor: '#1A1A1A',
           borderTopColor: '#333',
           borderTopWidth: 1,
-          height: 70,
-          paddingBottom: 16,
+          height: 60 + insets.bottom,
+          paddingBottom: insets.bottom > 0 ? insets.bottom : 8,
+          paddingTop: 8,
           position: 'absolute',
           bottom: 0,
           left: 0,
           right: 0,
         },
         unmountOnBlur: true,
-      }}
+      } as any}
     >
         <Tab.Screen
           name="Home"

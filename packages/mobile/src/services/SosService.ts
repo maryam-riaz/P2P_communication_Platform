@@ -51,7 +51,7 @@ export class SosService {
 
     const sosId = uuid.v4() as string;
     const timestamp = Date.now();
-    const myDeviceId = localUser._raw.device_id as string;
+    const myDeviceId = (localUser._raw as any).device_id as string;
 
     // 1. Write locally
     await this.repository.createSosEvent({
@@ -102,8 +102,8 @@ export class SosService {
     const localUser = await this.repository.getLocalUser();
     if (!localUser) throw new Error('No local profile found');
 
-    const myDeviceId = localUser._raw.device_id as string;
-    const myDisplayName = localUser._raw.display_name as string;
+    const myDeviceId = (localUser._raw as any).device_id as string;
+    const myDisplayName = (localUser._raw as any).display_name as string;
 
     // Find the target incident
     const sosEvents = await this.db.get<SosEvent>('sos_events')
@@ -114,8 +114,8 @@ export class SosService {
     // 1. Update DB entry locally
     await this.db.write(async () => {
       await incident.update((record) => {
-        record._raw.assigned_rescuer_id = myDeviceId;
-        record._raw.status = 'assigned';
+        (record._raw as any).assigned_rescuer_id = myDeviceId;
+        (record._raw as any).status = 'assigned';
       });
     });
 
@@ -154,16 +154,16 @@ export class SosService {
     // Save SOS incident locally
     const incident = await this.db.write(async () => {
       return await this.db.get<SosEvent>('sos_events').create((record) => {
-        record._raw.id = id;
-        record._raw.reporter_id = reporterId;
-        record._raw.lat = location.lat;
-        record._raw.lng = location.lng;
-        record._raw.accuracy = 5; // default accuracy fallback
-        record._raw.location_source = 'relay';
-        record._raw.severity = severity;
-        record._raw.status = 'open';
-        record._raw.assigned_rescuer_id = '';
-        record._raw.created_at = new Date(timestamp).getTime();
+        (record._raw as any).id = id;
+        (record._raw as any).reporter_id = reporterId;
+        (record._raw as any).lat = location.lat;
+        (record._raw as any).lng = location.lng;
+        (record._raw as any).accuracy = 5; // default accuracy fallback
+        (record._raw as any).location_source = 'relay';
+        (record._raw as any).severity = severity;
+        (record._raw as any).status = 'open';
+        (record._raw as any).assigned_rescuer_id = '';
+        (record._raw as any).created_at = new Date(timestamp).getTime();
       });
     });
 

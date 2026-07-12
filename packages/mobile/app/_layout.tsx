@@ -1,5 +1,17 @@
-import { Platform } from 'react-native';
+import { Platform, LogBox } from 'react-native';
 import * as Crypto from 'expo-crypto';
+
+if (__DEV__) {
+  LogBox.ignoreLogs(['Unable to activate keep awake']);
+  const originalConsoleError = console.error;
+  console.error = (...args: any[]) => {
+    if (args[0] && args[0].toString().includes('Unable to activate keep awake')) {
+      console.warn('[KeepAwake Suppressed]', args[0]);
+      return;
+    }
+    originalConsoleError(...args);
+  };
+}
 
 // Polyfill crypto.getRandomValues for Expo/React Native environments (used by @noble/curves)
 if (Platform.OS !== 'web' && (typeof globalThis.crypto === 'undefined' || typeof globalThis.crypto.getRandomValues !== 'function')) {

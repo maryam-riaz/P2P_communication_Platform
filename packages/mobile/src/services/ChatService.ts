@@ -4,7 +4,7 @@ import { sha256 } from 'js-sha256';
 import { MobileRepository } from '../db/repository';
 import { Message, LocalUser, KnownPeer } from '../db/models';
 import { SecureTransport } from '../comms/secure-transport';
-import { Observable, from, map, switchMap } from 'rxjs';
+import { BehaviorSubject, Observable, from, map, switchMap } from 'rxjs';
 
 
 export interface Conversation {
@@ -20,37 +20,112 @@ export class ChatService {
   private repository: MobileRepository;
   // Map of active secure transports keyed by remote peer device ID
   private activeTransports = new Map<string, SecureTransport>();
+  private activeTransportsSubject = new BehaviorSubject<string[]>([]);
+  private transportLastSeenMap = new Map<string, number>();
+  private heartbeatIntervalId: any = null;
 
   constructor(private db: Database) {
     this.repository = new MobileRepository(db);
+    this.startHeartbeatTimer();
+  }
+
+  private startHeartbeatTimer() {
+    this.heartbeatIntervalId = setInterval(async () => {
+      const now = Date.now();
+      const myUser = await this.repository.getLocalUser();
+      const myDeviceId = myUser ? (myUser._raw as any).device_id : 'unknown';
+
+      for (const [peerId, transport] of Array.from(this.activeTransports.entries())) {
+        const lastSeen = this.transportLastSeenMap.get(peerId) || 0;
+        
+        // If no data received for 25 seconds, assume peer went out of range or disconnected silently
+        if (now - lastSeen > 25000) {
+          console.log(`[ChatService] Peer ${peerId} silent for more than 25s. Pruning transport.`);
+          try {
+            await transport.disconnect();
+          } catch (err) {
+            console.warn('[ChatService] Error disconnecting silent transport:', err);
+          }
+          this.unregisterActiveTransport(peerId);
+        } else {
+          // Send keep-alive ping
+          try {
+            const pingPayload = {
+              type: 'ping',
+              senderId: myDeviceId,
+              timestamp: now
+            };
+            await transport.send(JSON.stringify(pingPayload));
+          } catch (err) {
+            console.warn(`[ChatService] Failed sending heartbeat ping to ${peerId}:`, err);
+          }
+        }
+      }
+    }, 10000); // Check every 10 seconds
   }
 
   registerActiveTransport(peerId: string, transport: SecureTransport) {
     this.activeTransports.set(peerId, transport);
+    this.transportLastSeenMap.set(peerId, Date.now());
+    this.activeTransportsSubject.next(Array.from(this.activeTransports.keys()));
     // When transport is established, trigger retry of pending messages for this peer
     this.retryPendingMessages(peerId);
   }
 
   unregisterActiveTransport(peerId: string) {
     this.activeTransports.delete(peerId);
+    this.transportLastSeenMap.delete(peerId);
+    this.activeTransportsSubject.next(Array.from(this.activeTransports.keys()));
+  }
+
+  updateTransportActivity(peerId: string) {
+    this.transportLastSeenMap.set(peerId, Date.now());
+  }
+
+  /**
+   * Stops the heartbeat timer. Call this when the service is being torn down
+   * (e.g., user logs out or app goes to background).
+   */
+  destroy() {
+    if (this.heartbeatIntervalId !== null) {
+      clearInterval(this.heartbeatIntervalId);
+      this.heartbeatIntervalId = null;
+      console.log('[ChatService] Heartbeat timer stopped.');
+    }
+  }
+
+  observeActiveTransportIds(): Observable<string[]> {
+    return this.activeTransportsSubject.asObservable();
   }
 
   getActiveTransport(peerId: string): SecureTransport | undefined {
     return this.activeTransports.get(peerId);
   }
 
+  getAllActiveTransports(): Map<string, SecureTransport> {
+    return this.activeTransports;
+  }
+  
   /**
-   * Observes all messages to a specific recipient, sorted chronologically.
+   * Observes all messages in a specific conversation, sorted chronologically.
+   * Filters to messages (local → remote) OR (remote → local) only.
+   * @param recipientId The remote peer's device ID
+   * @param localDeviceId This device's own device ID (to filter outbound messages correctly)
    */
-  observeMessagesByRecipient(recipientId: string): Observable<Message[]> {
-    const localUserQuery = this.db.get<LocalUser>('local_user').query();
-    
-    // Return messages where (sender = local and recipient = remote) OR (sender = remote and recipient = local)
+  observeMessagesByRecipient(recipientId: string, localDeviceId: string): Observable<Message[]> {
     return this.db.get<Message>('messages')
       .query(
         Q.or(
-          Q.and(Q.where('sender_id', recipientId)),
-          Q.and(Q.where('recipient_id', recipientId))
+          // Outbound: I sent to them
+          Q.and(
+            Q.where('sender_id', localDeviceId),
+            Q.where('recipient_id', recipientId)
+          ),
+          // Inbound: They sent to me
+          Q.and(
+            Q.where('sender_id', recipientId),
+            Q.where('recipient_id', localDeviceId)
+          )
         ),
         Q.sortBy('created_at', Q.asc)
       )
@@ -67,7 +142,7 @@ export class ChatService {
           (async () => {
             // Fetch local user and peers asynchronously (LokiJS does not support fetchSync)
             const localUsers = await this.db.get<LocalUser>('local_user').query().fetch();
-            const myDeviceId = localUsers[0]?._raw?.device_id as string | undefined;
+            const myDeviceId = (localUsers[0]?._raw as any)?.device_id as string | undefined;
             const peers = await this.db.get<KnownPeer>('known_peers').query().fetch();
 
             const conversationsMap = new Map<string, { lastMsg: Message; unread: number }>();
@@ -131,7 +206,7 @@ export class ChatService {
     await this.db.write(async () => {
       for (const msg of unreadMessages) {
         await msg.update(record => {
-          record._raw.sync_status = 'read';
+          (record._raw as any).sync_status = 'read';
         });
       }
     });
@@ -141,22 +216,33 @@ export class ChatService {
    * Sends a message to a recipient. Writes to local DB optimistically as 'pending',
    * and attempts to transmit over SecureTransport if connected.
    */
-  async sendMessage(text: string, recipientId: string): Promise<Message> {
+  async sendMessage(
+    text: string, 
+    recipientId: string, 
+    attachment?: { uri: string; type: 'image' | 'video' | 'audio'; name: string }
+  ): Promise<Message> {
     const localUser = await this.repository.getLocalUser();
     if (!localUser) throw new Error('No local user profile logged in');
 
     const messageId = uuid.v4() as string;
     const timestamp = Date.now();
-    const myDeviceId = localUser._raw.device_id as string;
+    const myDeviceId = (localUser._raw as any).device_id as string;
+
+    const messageBody = attachment 
+      ? JSON.stringify({ text, attachment })
+      : text;
+
+    // Hash is keyed on (messageId + senderId + timestamp_number) for stable deduplication
+    const contentHash = sha256(messageId + myDeviceId + timestamp);
 
     // 1. Write optimistically to Database
     const message = await this.repository.addNewMessage({
       id: messageId,
       senderId: myDeviceId,
       recipientId,
-      ciphertext: text, // Plaintext is stored locally for UI rendering
+      ciphertext: messageBody, // Store serialized payload
       signature: '',
-      contentHash: sha256(text + timestamp + messageId),
+      contentHash,
       hopCount: 1,
       ttl: 16,
       originDeviceId: myDeviceId,
@@ -172,8 +258,8 @@ export class ChatService {
           id: messageId,
           senderId: myDeviceId,
           recipientId,
-          text,
-          timestamp: new Date(timestamp).toISOString(),
+          text: messageBody,
+          timestamp, // send as numeric ms since epoch — receiver uses same value for hash
           type: 'chat'
         };
         await secureTransport.send(JSON.stringify(payload));
@@ -181,7 +267,7 @@ export class ChatService {
         // Update database status to 'sent'
         await this.db.write(async () => {
           await message.update(record => {
-            record._raw.sync_status = 'sent';
+            (record._raw as any).sync_status = 'sent';
           });
         });
       } catch (error) {
@@ -200,7 +286,10 @@ export class ChatService {
    */
   async handleIncomingMessage(payload: any): Promise<void> {
     const { id, senderId, recipientId, text, timestamp } = payload;
-    const contentHash = sha256(text + timestamp + id);
+    // Use the same hash scheme as sendMessage: (id + senderId + timestamp_number)
+    const tsNum = typeof timestamp === 'number' ? timestamp : new Date(timestamp).getTime();
+    const contentHash = sha256(id + senderId + tsNum);
+    console.log(`[ChatService] handleIncomingMessage check: id=${id}, senderId=${senderId}, recipientId=${recipientId}, contentHash=${contentHash}`);
 
     // Duplicate message check
     const existing = await this.repository.getMessageByHash(contentHash);
@@ -210,7 +299,7 @@ export class ChatService {
     }
 
     // Write message to DB
-    await this.repository.addNewMessage({
+    const saved = await this.repository.addNewMessage({
       id,
       senderId,
       recipientId: recipientId || '',
@@ -220,9 +309,10 @@ export class ChatService {
       hopCount: 1,
       ttl: 16,
       originDeviceId: senderId,
-      syncStatus: 'delivered', // received is marked delivered initially
-      createdAt: new Date(timestamp).getTime()
+      syncStatus: 'delivered',
+      createdAt: tsNum
     });
+    console.log(`[ChatService] Successfully written incoming message to DB. ID: ${saved.id}, Sender: ${senderId}`);
   }
 
   /**
@@ -257,7 +347,7 @@ export class ChatService {
         
         await this.db.write(async () => {
           await msg.update(record => {
-            record._raw.sync_status = 'sent';
+            (record._raw as any).sync_status = 'sent';
           });
         });
       } catch (err) {
