@@ -398,17 +398,29 @@ export function useInitializeServices() {
         });
 
         let lastDiscoverTime = 0;
+        const scannedPeersCache = new Set<string>();
 
         // Wire up BLE discovery callback
         currentScanner = new BleScanner(async (peerDevice) => {
-          const peersRepo = new MobileRepository(db);
-          
-          await peersRepo.addNewPeer({
-            deviceId: peerDevice.deviceId,
-            publicKey: peerDevice.publicKeyHash, // Map public key hash as stub placeholder
-            role: peerDevice.role,
-            trustStatus: 'pending'
-          });
+          if (!scannedPeersCache.has(peerDevice.deviceId)) {
+            scannedPeersCache.add(peerDevice.deviceId);
+            try {
+              const peersRepo = new MobileRepository(db);
+              const exists = await peersRepo.getPeer(peerDevice.deviceId);
+              if (!exists) {
+                console.log(`[P2P DEBUG] First time seeing peer ${peerDevice.deviceId.substring(0, 8)} via BLE. Adding to local DB...`);
+                await peersRepo.addNewPeer({
+                  deviceId: peerDevice.deviceId,
+                  publicKey: peerDevice.publicKeyHash,
+                  role: peerDevice.role,
+                  trustStatus: 'pending'
+                });
+              }
+            } catch (err) {
+              console.warn('[P2P DEBUG] Failed to query/add new BLE peer to DB:', err);
+              scannedPeersCache.delete(peerDevice.deviceId);
+            }
+          }
 
           mapService.updatePeerRssi(peerDevice.deviceId, peerDevice.rssi);
 

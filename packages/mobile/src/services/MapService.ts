@@ -2,7 +2,7 @@ import { Database } from '@nozbe/watermelondb';
 import * as Location from 'expo-location';
 import { MobileRepository } from '../db/repository';
 import { KnownPeer, LocationLog } from '../db/models';
-import { Observable, Subject, map, combineLatest, startWith } from 'rxjs';
+import { Observable, Subject, map, combineLatest, startWith, throttleTime } from 'rxjs';
 import { ChatService } from './ChatService';
 
 export interface PeerPin {
@@ -130,7 +130,10 @@ export class MapService {
    */
   observePeerLocations(): Observable<PeerPin[]> {
     const peers$ = this.db.get<KnownPeer>('known_peers').query().observe();
-    const rssiTrigger$ = this.rssiUpdateSubject.asObservable().pipe(startWith(null));
+    const rssiTrigger$ = this.rssiUpdateSubject.asObservable().pipe(
+      throttleTime(3000),
+      startWith(null)
+    );
 
     return combineLatest([peers$, rssiTrigger$]).pipe(
       map(([peers]) => {

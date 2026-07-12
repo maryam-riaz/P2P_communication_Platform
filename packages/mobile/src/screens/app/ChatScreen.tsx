@@ -16,6 +16,7 @@ import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context'
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { useFocusEffect } from '@react-navigation/native';
 import * as DocumentPicker from 'expo-document-picker';
+import { Audio } from 'expo-av';
 import { Image } from 'expo-image';
 import { useService } from '../../hooks/useService';
 import { ChatService } from '../../services/ChatService';
@@ -79,10 +80,28 @@ export default function ChatScreen({ route, navigation }: any) {
   const [localDeviceId, setLocalDeviceId] = useState('');
   const flatListRef = useRef<FlatList>(null);
 
-  // Simulated Media Playback state
+  // Native Audio Playback/Recording state
   const [playingAudioId, setPlayingAudioId] = useState<string | null>(null);
   const [audioProgress, setAudioProgress] = useState(0);
-  const playbackInterval = useRef<any>(null);
+  const soundRef = useRef<Audio.Sound | null>(null);
+
+  const [isRecording, setIsRecording] = useState(false);
+  const [recordingDuration, setRecordingDuration] = useState(0);
+  const recordingRef = useRef<Audio.Recording | null>(null);
+  const recordingInterval = useRef<any>(null);
+
+  // Clean up audio resources on unmount
+  useEffect(() => {
+    return () => {
+      if (soundRef.current) {
+        soundRef.current.unloadAsync().catch(() => {});
+      }
+      if (recordingRef.current) {
+        recordingRef.current.stopAndUnloadAsync().catch(() => {});
+      }
+      clearInterval(recordingInterval.current);
+    };
+  }, []);
 
   // Full Screen Image Preview modal
   const [previewImage, setPreviewImage] = useState<string | null>(null);
@@ -215,31 +234,137 @@ export default function ChatScreen({ route, navigation }: any) {
     }
   };
 
-  const toggleAudioPlayback = (msgId: string) => {
-    if (playingAudioId === msgId) {
-      // Pause
-      clearInterval(playbackInterval.current);
-      setPlayingAudioId(null);
-      setAudioProgress(0);
-    } else {
-      // Stop old audio if playing
-      if (playbackInterval.current) clearInterval(playbackInterval.current);
-      
-      setPlayingAudioId(msgId);
-      setAudioProgress(0);
+  const startRecording = async () => {
+    try {
+      const permission = await Audio.requestPermissionsAsync();
+      if (permission.status !== 'granted') {
+        alert('Microphone permission is required to record voice notes.');
+        return;
+      }
 
-      // Simulate playing for 10 seconds
-      let cur = 0;
-      playbackInterval.current = setInterval(() => {
-        cur += 10;
-        if (cur >= 100) {
-          clearInterval(playbackInterval.current);
+      await Audio.setAudioModeAsync({
+        allowsRecordingIOS: true,
+        playsInSilentModeIOS: true,
+      });
+
+      console.log('[Audio Recorder] Starting native audio recording...');
+      const recording = new Audio.Recording();
+      await recording.prepareToRecordAsync(Audio.RecordingOptionsPresets.HIGH_QUALITY);
+      await recording.startAsync();
+      recordingRef.current = recording;
+      setIsRecording(true);
+      setRecordingDuration(0);
+
+      recordingInterval.current = setInterval(() => {
+        setRecordingDuration((prev) => prev + 1);
+      }, 1000);
+    } catch (err) {
+      console.error('[Audio Recorder] Start recording failed:', err);
+    }
+  };
+
+  const stopAndSendRecording = async () => {
+    if (!recordingRef.current) return;
+
+    clearInterval(recordingInterval.current);
+    const recording = recordingRef.current;
+    recordingRef.current = null;
+    setIsRecording(false);
+    setRecordingDuration(0);
+
+    try {
+      console.log('[Audio Recorder] Stopping recording...');
+      await recording.stopAndUnloadAsync();
+      const uri = recording.getURI();
+      if (!uri) return;
+
+      setIsSending(true);
+
+      // Read audio file base64 data
+      const response = await fetch(uri);
+      const blob = await response.blob();
+      const base64DataUrl = await new Promise<string>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onloadend = () => resolve(reader.result as string);
+        reader.onerror = reject;
+        reader.readAsDataURL(blob);
+      });
+
+      const fileName = `voice-note-${Date.now()}.m4a`;
+      await chatService.sendMessage('', recipientId, {
+        uri: base64DataUrl,
+        type: 'audio',
+        name: fileName,
+      });
+    } catch (err) {
+      console.error('[Audio Recorder] Stop and send failed:', err);
+    } finally {
+      setIsSending(false);
+    }
+  };
+
+  const cancelRecording = async () => {
+    if (!recordingRef.current) return;
+
+    clearInterval(recordingInterval.current);
+    const recording = recordingRef.current;
+    recordingRef.current = null;
+    setIsRecording(false);
+    setRecordingDuration(0);
+
+    try {
+      console.log('[Audio Recorder] Discarding recording...');
+      await recording.stopAndUnloadAsync();
+    } catch (err) {
+      console.warn('[Audio Recorder] Cancel cleanup failed:', err);
+    }
+  };
+
+  const toggleAudioPlayback = async (msgId: string, audioUri: string) => {
+    try {
+      if (playingAudioId === msgId) {
+        // Pause
+        if (soundRef.current) {
+          await soundRef.current.pauseAsync();
           setPlayingAudioId(null);
-          setAudioProgress(0);
-        } else {
-          setAudioProgress(cur);
         }
-      }, 300);
+      } else {
+        // Stop previous sound
+        if (soundRef.current) {
+          try {
+            await soundRef.current.stopAsync();
+            await soundRef.current.unloadAsync();
+          } catch (e) {}
+          soundRef.current = null;
+        }
+
+        console.log('[Audio Player] Loading audio note for playback...');
+        const { sound } = await Audio.Sound.createAsync(
+          { uri: audioUri },
+          { shouldPlay: true },
+          (status) => {
+            if (status.isLoaded) {
+              if (status.durationMillis && status.durationMillis > 0) {
+                const progress = (status.positionMillis / status.durationMillis) * 100;
+                setAudioProgress(progress);
+              }
+              if (status.didJustFinish) {
+                setPlayingAudioId(null);
+                setAudioProgress(0);
+                if (soundRef.current) {
+                  soundRef.current.unloadAsync().catch(() => {});
+                  soundRef.current = null;
+                }
+              }
+            }
+          }
+        );
+        soundRef.current = sound;
+        setPlayingAudioId(msgId);
+        setAudioProgress(0);
+      }
+    } catch (err) {
+      console.error('[Audio Player] Playback toggle failed:', err);
     }
   };
 
@@ -262,7 +387,7 @@ export default function ChatScreen({ route, navigation }: any) {
         <View style={styles.audioContainer}>
           <TouchableOpacity
             style={styles.audioPlayButton}
-            onPress={() => toggleAudioPlayback(msgId)}
+            onPress={() => toggleAudioPlayback(msgId, attachment.uri)}
           >
             <MaterialCommunityIcons
               name={isCurrentPlaying ? 'pause' : 'play'}
@@ -406,33 +531,70 @@ export default function ChatScreen({ route, navigation }: any) {
       <View style={styles.inputWrapper}>
         <SafeAreaView edges={['bottom']} style={styles.inputSafeArea}>
           <View style={styles.inputContainer}>
-            <TouchableOpacity
-              style={styles.attachButton}
-              onPress={handlePickAttachment}
-              disabled={isPicking || isSending}
-            >
-              <MaterialCommunityIcons name="paperclip" size={22} color="#FF8C42" />
-            </TouchableOpacity>
-            <TextInput
-              style={styles.input}
-              placeholder="Message..."
-              placeholderTextColor="#666"
-              value={inputText}
-              onChangeText={setInputText}
-              multiline
-              editable={!isSending}
-            />
-            <TouchableOpacity
-              style={[styles.sendButton, inputText.trim() && styles.sendButtonActive]}
-              onPress={handleSendMessage}
-              disabled={!inputText.trim() || isSending}
-            >
-              {isSending ? (
-                <ActivityIndicator size="small" color="#FFF" />
-              ) : (
-                <MaterialCommunityIcons name="send" size={20} color="#FFF" />
-              )}
-            </TouchableOpacity>
+            {isRecording ? (
+              <>
+                <TouchableOpacity
+                  style={styles.cancelRecordButton}
+                  onPress={cancelRecording}
+                >
+                  <MaterialCommunityIcons name="trash-can-outline" size={24} color="#FF3B30" />
+                </TouchableOpacity>
+
+                <View style={styles.recordingIndicator}>
+                  <View style={styles.recordingDot} />
+                  <Text style={styles.recordingText}>
+                    Recording {Math.floor(recordingDuration / 60)}:{('0' + (recordingDuration % 60)).slice(-2)}
+                  </Text>
+                </View>
+
+                <TouchableOpacity
+                  style={[styles.sendButton, styles.sendButtonActive]}
+                  onPress={stopAndSendRecording}
+                >
+                  <MaterialCommunityIcons name="send" size={20} color="#FFF" />
+                </TouchableOpacity>
+              </>
+            ) : (
+              <>
+                <TouchableOpacity
+                  style={styles.attachButton}
+                  onPress={handlePickAttachment}
+                  disabled={isPicking || isSending}
+                >
+                  <MaterialCommunityIcons name="paperclip" size={22} color="#FF8C42" />
+                </TouchableOpacity>
+                <TextInput
+                  style={styles.input}
+                  placeholder="Message..."
+                  placeholderTextColor="#666"
+                  value={inputText}
+                  onChangeText={setInputText}
+                  multiline
+                  editable={!isSending}
+                />
+                {inputText.trim() ? (
+                  <TouchableOpacity
+                    style={[styles.sendButton, styles.sendButtonActive]}
+                    onPress={handleSendMessage}
+                    disabled={isSending}
+                  >
+                    {isSending ? (
+                      <ActivityIndicator size="small" color="#FFF" />
+                    ) : (
+                      <MaterialCommunityIcons name="send" size={20} color="#FFF" />
+                    )}
+                  </TouchableOpacity>
+                ) : (
+                  <TouchableOpacity
+                    style={[styles.sendButton, styles.sendButtonActive, { backgroundColor: '#FF8C42' }]}
+                    onPress={startRecording}
+                    disabled={isSending}
+                  >
+                    <MaterialCommunityIcons name="microphone" size={22} color="#FFF" />
+                  </TouchableOpacity>
+                )}
+              </>
+            )}
           </View>
         </SafeAreaView>
       </View>
@@ -619,6 +781,28 @@ const styles = StyleSheet.create({
     borderRadius: 8,
     marginBottom: 4,
     backgroundColor: '#050505',
+  },
+  cancelRecordButton: {
+    padding: 10,
+    marginRight: 4,
+  },
+  recordingIndicator: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 8,
+  },
+  recordingDot: {
+    width: 10,
+    height: 10,
+    borderRadius: 5,
+    backgroundColor: '#FF3B30',
+    marginRight: 8,
+  },
+  recordingText: {
+    color: '#FFF',
+    fontSize: 14,
+    fontWeight: '600',
   },
   audioContainer: {
     flexDirection: 'row',
