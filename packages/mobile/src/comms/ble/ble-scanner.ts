@@ -71,23 +71,40 @@ export class BleScanner {
   startScanning(): void {
     if (this.isScanning) return;
     this.isScanning = true;
-    console.log('[BLE Scanner] Continuous scanning started.');
+    console.log('[BLE Scanner] Periodic scanning started.');
 
-    // Start BLE scan. We pass null filter to bypass Android's 128-bit UUID filtering bugs on some devices,
-    // and use allowDuplicates: true to ensure the map gets real-time signal strength (RSSI) updates.
-    this.bleManager.startDeviceScan(
-      null,
-      { allowDuplicates: true },
-      (error, device) => {
-        if (error) {
-          console.error('[BLE Scanner] Scan error:', error);
-          return;
+    const startScan = () => {
+      if (!this.isScanning) return;
+      this.bleManager.startDeviceScan(
+        null,
+        { allowDuplicates: false },
+        (error, device) => {
+          if (error) {
+            console.error('[BLE Scanner] Scan error:', error);
+            return;
+          }
+          if (device) {
+            this.handleDiscoveredDevice(device);
+          }
         }
-        if (device) {
-          this.handleDiscoveredDevice(device);
+      );
+    };
+
+    const runScanCycle = () => {
+      if (!this.isScanning) return;
+
+      startScan();
+
+      // Schedule the next scan restart in 5 seconds (prevents interval piling during thread lags)
+      this.scanTimer = setTimeout(() => {
+        if (this.isScanning) {
+          this.bleManager.stopDeviceScan();
+          runScanCycle();
         }
-      }
-    );
+      }, 5000);
+    };
+
+    runScanCycle();
   }
 
   /**
@@ -97,6 +114,10 @@ export class BleScanner {
     if (!this.isScanning) return;
     this.isScanning = false;
 
+    if (this.scanTimer) {
+      clearTimeout(this.scanTimer);
+      this.scanTimer = null;
+    }
     this.bleManager.stopDeviceScan();
     console.log('[BLE Scanner] Scanning stopped.');
   }

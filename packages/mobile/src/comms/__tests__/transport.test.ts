@@ -42,7 +42,7 @@ describe('P2P Comms Transport Layer End-to-End Tests', () => {
     const rawPayload = advertiserA.getSerializedPayload();
     scannerB.onAdvertisementReceived(rawPayload, -45); // strong RSSI
 
-    scannerB.stopScanning();
+    scannerB.destroy();
     advertiserA.stopAdvertising();
 
     expect(discoveredDevice).not.toBeNull();
