@@ -11,6 +11,9 @@ import {
   Platform,
   ActivityIndicator,
   Modal,
+  Linking,
+  Alert,
+  NativeModules,
 } from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
@@ -164,8 +167,39 @@ export default function ChatScreen({ route, navigation }: any) {
     }, [navigation, defaultTabBarStyle])
   );
 
+  const checkWifiBeforeSend = async (): Promise<boolean> => {
+    if (Platform.OS === 'android') {
+      try {
+        if (NativeModules.WifiDirect && typeof NativeModules.WifiDirect.isWifiEnabled === 'function') {
+          const wifiEnabled = await NativeModules.WifiDirect.isWifiEnabled();
+          if (!wifiEnabled) {
+            Alert.alert(
+              'Wi-Fi Required',
+              'Wi-Fi is turned off. Please turn it on to send messages offline.',
+              [
+                { text: 'Cancel', style: 'cancel' },
+                { text: 'Turn On', onPress: () => {
+                  if (NativeModules.WifiDirect && typeof NativeModules.WifiDirect.setWifiEnabled === 'function') {
+                    NativeModules.WifiDirect.setWifiEnabled(true).catch(console.error);
+                  }
+                }}
+              ]
+            );
+            return false;
+          }
+        }
+      } catch (err) {
+        console.warn('Failed to check Wi-Fi state:', err);
+      }
+    }
+    return true;
+  };
+
   const handleSendMessage = async () => {
     if (!inputText.trim() || !recipientId || isSending) return;
+
+    const isWifiOk = await checkWifiBeforeSend();
+    if (!isWifiOk) return;
 
     const text = inputText.trim();
     setInputText('');
@@ -182,6 +216,8 @@ export default function ChatScreen({ route, navigation }: any) {
 
   const handlePickAttachment = async () => {
     if (isPicking || isSending) return;
+    const isWifiOk = await checkWifiBeforeSend();
+    if (!isWifiOk) return;
     setIsPicking(true);
 
     try {
@@ -238,7 +274,7 @@ export default function ChatScreen({ route, navigation }: any) {
     try {
       const permission = await Audio.requestPermissionsAsync();
       if (permission.status !== 'granted') {
-        alert('Microphone permission is required to record voice notes.');
+        await Linking.openSettings();
         return;
       }
 
@@ -265,6 +301,18 @@ export default function ChatScreen({ route, navigation }: any) {
 
   const stopAndSendRecording = async () => {
     if (!recordingRef.current) return;
+
+    const isWifiOk = await checkWifiBeforeSend();
+    if (!isWifiOk) {
+      clearInterval(recordingInterval.current);
+      try {
+        await recordingRef.current.stopAndUnloadAsync();
+      } catch {}
+      recordingRef.current = null;
+      setIsRecording(false);
+      setRecordingDuration(0);
+      return;
+    }
 
     clearInterval(recordingInterval.current);
     const recording = recordingRef.current;

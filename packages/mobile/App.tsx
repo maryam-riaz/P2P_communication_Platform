@@ -58,10 +58,13 @@ function AppContent() {
   );
 }
 
+import HardwarePermissionModal from './components/HardwarePermissionModal';
+
 export default function App() {
   return (
     <Provider store={store}>
       <AppContent />
+      <HardwarePermissionModal />
       <StatusBar barStyle="light-content" />
     </Provider>
   );

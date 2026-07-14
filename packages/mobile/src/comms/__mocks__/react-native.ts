@@ -62,6 +62,9 @@ const WifiDirectMock = {
     groupFormed: true,
   }),
   disconnect: jest.fn().mockResolvedValue(undefined),
+  isWifiEnabled: jest.fn().mockResolvedValue(true),
+  setWifiEnabled: jest.fn().mockResolvedValue(true),
+  setBluetoothEnabled: jest.fn().mockResolvedValue(true),
 
   /** Opens a TCP server. Resolves when bound. Fires WifiDirectTcpConnected on accept. */
   openServerSocket: jest.fn().mockImplementation((port: number) => {

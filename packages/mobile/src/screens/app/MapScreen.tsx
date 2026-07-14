@@ -16,6 +16,7 @@ import { RootState } from '../../redux/store';
 import { setUserLocation, setNearbyUsers, setNearbyRescuers } from '../../redux/slices/mapSlice';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import * as Location from 'expo-location';
+import { BleManager } from 'react-native-ble-plx';
 import { useService } from '../../hooks/useService';
 import { MapService, PeerPin } from '../../services/MapService';
 import { SosService } from '../../services/SosService';
@@ -83,10 +84,10 @@ export default function MapScreen({ navigation }: any) {
   const { userLocation, nearbyUsers, nearbyRescuers } = useSelector(
     (state: RootState) => state.map
   );
-  
+
   const mapService = useService(MapService);
   const sosService = useService(SosService);
-  
+
   const [rawPeers, setRawPeers] = useState<PeerPin[]>([]);
   const [sosPins, setSosPins] = useState<any[]>([]);
   const [peerCount, setPeerCount] = useState(0);
@@ -97,6 +98,7 @@ export default function MapScreen({ navigation }: any) {
   const [isMapReady, setIsMapReady] = useState(false);
   const [wifiEnabled, setWifiEnabled] = useState(true);
   const [gpsEnabled, setGpsEnabled] = useState(true);
+  const [bluetoothEnabled, setBluetoothEnabled] = useState(true);
 
   // Check system services state (Wi-Fi and Location)
   useEffect(() => {
@@ -104,6 +106,7 @@ export default function MapScreen({ navigation }: any) {
 
     let isMounted = true;
 
+    const bleManager = new BleManager();
     const checkGps = async () => {
       try {
         const enabled = await Location.hasServicesEnabledAsync();
@@ -113,12 +116,25 @@ export default function MapScreen({ navigation }: any) {
       }
     };
 
-    // Check GPS immediately and periodically
+    const checkBluetooth = async () => {
+      try {
+        const state = await bleManager.state();
+        if (isMounted) setBluetoothEnabled(state === 'PoweredOn');
+      } catch (e) {
+        // Fallback
+      }
+    };
+
+    // Check GPS and Bluetooth immediately and periodically
     checkGps();
-    const interval = setInterval(checkGps, 3000);
+    checkBluetooth();
+    const interval = setInterval(() => {
+      checkGps();
+      checkBluetooth();
+    }, 3000);
 
     // Subscribe to Wi-Fi Direct state changes
-    let unsubState = () => {};
+    let unsubState = () => { };
     try {
       const { AndroidWifiP2PTransport } = require('../../comms/wifi-direct/wifi-p2p-transport.android');
       unsubState = AndroidWifiP2PTransport.onStateChanged((enabled: boolean) => {
@@ -131,6 +147,7 @@ export default function MapScreen({ navigation }: any) {
     return () => {
       isMounted = false;
       clearInterval(interval);
+      bleManager.destroy();
       unsubState();
     };
   }, []);
@@ -227,7 +244,7 @@ export default function MapScreen({ navigation }: any) {
         if (peerLat === null || peerLng === null) {
           const d = rssiToDistance(p.rssi);
           const angle = getStableAngleForPeer(p.deviceId);
-          
+
           // 111111 meters roughly equal to 1 degree of coordinate offset
           const latOffset = (d / 111111) * Math.sin(angle);
           const lngOffset = (d / (111111 * Math.cos(baseLat! * (Math.PI / 180)))) * Math.cos(angle);
@@ -261,7 +278,7 @@ export default function MapScreen({ navigation }: any) {
 
   const handleCenterMap = useCallback(() => {
     if (!mySolvedCoords || !mapRef.current || !isMapReady) return;
-    
+
     const coordsToFit = [{ latitude: mySolvedCoords.latitude, longitude: mySolvedCoords.longitude }];
     solvedPeers.forEach((p) => {
       if (p.location && p.location.latitude && p.location.longitude) {
@@ -314,15 +331,17 @@ export default function MapScreen({ navigation }: any) {
       </SafeAreaView>
 
       {/* Warning Banner for Disabled Services */}
-      {Platform.OS === 'android' && (!wifiEnabled || !gpsEnabled) && (
+      {Platform.OS === 'android' && (!wifiEnabled || !gpsEnabled || !bluetoothEnabled) && (
         <View style={styles.warningBanner}>
           <MaterialCommunityIcons name="alert-circle" size={18} color="#FFF" style={{ marginRight: 8 }} />
           <Text style={styles.warningText}>
-            {!wifiEnabled && !gpsEnabled
-              ? 'Warning: Wi-Fi and Location/GPS are turned off. Please enable them in your quick settings panel to communicate with nearby peers.'
+            {!wifiEnabled && !gpsEnabled && !bluetoothEnabled
+              ? 'Warning: Wi-Fi, Bluetooth and Location/GPS are turned off. Please enable them to communicate with nearby devices.'
               : !wifiEnabled
-              ? 'Warning: Wi-Fi is turned off. Please enable it in your quick settings panel to search and connect to nearby peers.'
-              : 'Warning: Location Services/GPS is turned off. Please enable it in your settings to discover nearby peers.'}
+                ? 'Warning: Wi-Fi is turned off.Please enable it to communicate with nearby devices'
+                : !bluetoothEnabled
+                  ? 'Warning: Bluetooth is turned off.Please enable it to detect nearby devices'
+                  : 'Warning: Location Services/GPS is turned off.Please enable it to locate nearby devices'}
           </Text>
         </View>
       )}
