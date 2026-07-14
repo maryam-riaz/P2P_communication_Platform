@@ -206,7 +206,7 @@ export class ChatService {
     await this.db.write(async () => {
       for (const msg of unreadMessages) {
         await msg.update(record => {
-          (record._raw as any).sync_status = 'read';
+          record.localSyncStatus = 'read';
         });
       }
     });
@@ -267,7 +267,7 @@ export class ChatService {
         // Update database status to 'sent'
         await this.db.write(async () => {
           await message.update(record => {
-            (record._raw as any).sync_status = 'sent';
+            record.localSyncStatus = 'sent';
           });
         });
       } catch (error) {
@@ -310,7 +310,7 @@ export class ChatService {
       ttl: 16,
       originDeviceId: senderId,
       syncStatus: 'delivered',
-      createdAt: tsNum
+      createdAt: Date.now()
     });
     console.log(`[ChatService] Successfully written incoming message to DB. ID: ${saved.id}, Sender: ${senderId}`);
   }
@@ -347,7 +347,7 @@ export class ChatService {
         
         await this.db.write(async () => {
           await msg.update(record => {
-            (record._raw as any).sync_status = 'sent';
+            record.localSyncStatus = 'sent';
           });
         });
       } catch (err) {

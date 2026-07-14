@@ -132,7 +132,6 @@ export class SecureTransport {
 
       // Trigger all pending handshake ready callbacks
       this.handshakeCallbacks.forEach((cb) => cb());
-      this.handshakeCallbacks = [];
       return;
     }
 
@@ -168,6 +167,10 @@ export class SecureTransport {
   }
 
   async disconnect(): Promise<void> {
+    this.handshakeCompleted = false;
+    this.remotePublicKeyHex = null;
+    this.remoteDeviceId = null;
+    this.remoteDisplayName = null;
     await this.rawTransport.disconnect();
   }
 }

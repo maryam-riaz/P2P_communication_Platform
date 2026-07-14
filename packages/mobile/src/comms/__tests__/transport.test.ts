@@ -20,7 +20,7 @@ describe('P2P Comms Transport Layer End-to-End Tests', () => {
     const roleA = 'responder';
     const pkHashA = 'abcdef12';
 
-    const advertiserA = new BleAdvertiser(deviceIdA, roleA, pkHashA);
+    const advertiserA = new BleAdvertiser(deviceIdA, roleA, pkHashA, 'Device A');
     rawTransportA = new AndroidWifiP2PTransport(deviceIdA);
 
     // 2. Setup Device B (Client/Scanner)
