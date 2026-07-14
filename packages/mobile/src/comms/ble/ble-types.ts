@@ -7,6 +7,7 @@ export interface BleDevice {
   timestamp: number;      // Epoch timestamp when advertised
   rssi: number;           // signal strength indicator
   lastSeen: number;       // system timestamp when scanned
+  displayName?: string;   // resolved display name from local name
 }
 
 // Custom Service UUID for the Disaster P2P Application discovery channel

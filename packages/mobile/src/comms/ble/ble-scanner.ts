@@ -101,7 +101,7 @@ export class BleScanner {
           this.bleManager.stopDeviceScan();
           runScanCycle();
         }
-      }, 5000);
+      }, 35000);
     };
 
     runScanCycle();
@@ -144,7 +144,7 @@ export class BleScanner {
       if (rawBytes.length === 27 && rawBytes[0] === 0xFF && rawBytes[1] === 0xFF) {
         console.log(`[BLE Scanner] Match found! MAC: ${device.id}, RSSI: ${device.rssi}`);
         const payload = rawBytes.subarray(2); // Skip company ID
-        this.onAdvertisementReceived(payload, device.rssi ?? -100);
+        this.onAdvertisementReceived(payload, device.rssi ?? -100, device.name ?? null);
       }
     } catch (error) {
       console.error('[BLE Scanner] Error parsing discovered device:', error);
@@ -155,9 +155,18 @@ export class BleScanner {
    * Decodes and delivers a raw advertisement data payload to the app callback.
    * Also callable directly in tests via the existing test harness.
    */
-  onAdvertisementReceived(rawManufacturerData: Uint8Array, rssi: number): void {
+  onAdvertisementReceived(rawManufacturerData: Uint8Array, rssi: number, localName: string | null = null): void {
     try {
       const unpacked = unpackAdvertisementPayload(rawManufacturerData);
+      
+      let displayName: string | undefined = undefined;
+      if (localName && localName.startsWith('DP2P:')) {
+        const parts = localName.split(':');
+        if (parts.length >= 3) {
+          displayName = parts[1];
+        }
+      }
+
       this.onPeerDiscovered({
         deviceId: unpacked.deviceId,
         role: unpacked.role,
@@ -165,6 +174,7 @@ export class BleScanner {
         timestamp: unpacked.timestamp,
         rssi,
         lastSeen: Date.now(),
+        displayName,
       });
     } catch (error) {
       console.error('[BLE Scanner] Error unpacking discovered advertisement', error);

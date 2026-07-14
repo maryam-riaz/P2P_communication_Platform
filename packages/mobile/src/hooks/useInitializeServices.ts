@@ -139,9 +139,11 @@ export function useInitializeServices() {
         if (currentScanner) currentScanner.stopScanning();
         if (currentRawTransport) await currentRawTransport.disconnect();
 
+        const displayName = (user._raw as any).display_name || 'Peer';
+
         // Instantiate Phase 2 BLE scanning & advertising
         const pubKeyHash = publicKey.slice(0, 8); // 4-byte hash (8 hex chars)
-        currentAdvertiser = new BleAdvertiser(deviceId, role, pubKeyHash);
+        currentAdvertiser = new BleAdvertiser(deviceId, role, pubKeyHash, displayName);
         try {
           await currentAdvertiser.startAdvertising();
         } catch (err) {
@@ -152,7 +154,6 @@ export function useInitializeServices() {
         currentRawTransport = new AndroidWifiP2PTransport(deviceId);
 
         // Instantiate Phase 3 Cryptographic secure channel
-        const displayName = (user._raw as any).display_name || 'Peer';
         currentSecureTransport = new SecureTransport(currentRawTransport, privateKey, publicKey, deviceId, displayName);
 
         // ── CRITICAL: Register SecureTransport callbacks BEFORE any TCP socket opens ──
@@ -345,8 +346,14 @@ export function useInitializeServices() {
             return;
           }
 
-          // Find an available peer (status 3 = AVAILABLE)
-          const peer = peers.find((p) => p.status === 3);
+          // Find an available peer (status 3 = AVAILABLE) matching our test devices (A32, A33, vivo, samsung)
+          const peer = peers.find((p) => 
+            p.status === 3 && 
+            (p.deviceName.toLowerCase().includes("a32") || 
+             p.deviceName.toLowerCase().includes("a33") || 
+             p.deviceName.toLowerCase().includes("vivo") || 
+             p.deviceName.toLowerCase().includes("samsung"))
+          );
           if (!peer) {
             console.log('[P2P DEBUG] No peers in the list are currently in AVAILABLE status.');
             return;
@@ -413,7 +420,16 @@ export function useInitializeServices() {
                   deviceId: peerDevice.deviceId,
                   publicKey: peerDevice.publicKeyHash,
                   role: peerDevice.role,
-                  trustStatus: 'pending'
+                  trustStatus: 'pending',
+                  displayName: peerDevice.displayName
+                });
+              } else if (!(exists._raw as any).display_name && peerDevice.displayName) {
+                await peersRepo.addNewPeer({
+                  deviceId: peerDevice.deviceId,
+                  publicKey: peerDevice.publicKeyHash,
+                  role: peerDevice.role,
+                  trustStatus: (exists._raw as any).trust_status,
+                  displayName: peerDevice.displayName
                 });
               }
             } catch (err) {

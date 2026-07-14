@@ -63,7 +63,8 @@ export class BleAdvertiser {
   constructor(
     private deviceId: string,
     private role: UserRole,
-    private publicKeyHash: string
+    private publicKeyHash: string,
+    private displayName: string
   ) {}
 
   /**
@@ -86,7 +87,10 @@ export class BleAdvertiser {
       binary += String.fromCharCode(payloadBytes[i]);
     }
     const payloadBase64 = btoa(binary);
-    const localName = `DisasterP2P-${this.deviceId.substring(0, 8)}`;
+    
+    // Sanitize display name to keep it alphanumeric and short to fit BLE limits (max 31 bytes total)
+    const sanitizedName = this.displayName.replace(/[^a-zA-Z0-9 ]/g, '').substring(0, 10);
+    const localName = `DP2P:${sanitizedName}:${this.deviceId.substring(0, 8)}`;
 
     if (!NativeBleAdvertiser) {
       // Non-native environment (e.g. Jest/Node.js test runner)
