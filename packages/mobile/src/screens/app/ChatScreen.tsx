@@ -7,13 +7,14 @@ import {
   TextInput,
   TouchableOpacity,
   StatusBar,
-  KeyboardAvoidingView,
   Platform,
   ActivityIndicator,
   Modal,
   Linking,
   Alert,
   NativeModules,
+  KeyboardAvoidingView,
+  Keyboard,
 } from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
@@ -71,6 +72,27 @@ function toDisplayMessage(msg: Message, localDeviceId: string): DisplayMessage {
 
 export default function ChatScreen({ route, navigation }: any) {
   const chatService = useService(ChatService);
+  const insets = useSafeAreaInsets();
+
+  const [isKeyboardOpen, setIsKeyboardOpen] = useState(false);
+
+  useEffect(() => {
+    const showSubscription = Keyboard.addListener(
+      Platform.OS === 'ios' ? 'keyboardWillShow' : 'keyboardDidShow',
+      () => setIsKeyboardOpen(true)
+    );
+    const hideSubscription = Keyboard.addListener(
+      Platform.OS === 'ios' ? 'keyboardWillHide' : 'keyboardDidHide',
+      () => setIsKeyboardOpen(false)
+    );
+
+    return () => {
+      showSubscription.remove();
+      hideSubscription.remove();
+    };
+  }, []);
+
+  const bottomPadding = isKeyboardOpen ? 0 : insets.bottom;
 
   const person = route?.params?.person || { id: '', name: 'Chat' };
   const recipientId: string = person.id || route?.params?.recipientId || '';
@@ -81,7 +103,31 @@ export default function ChatScreen({ route, navigation }: any) {
   const [isSending, setIsSending] = useState(false);
   const [isPicking, setIsPicking] = useState(false);
   const [localDeviceId, setLocalDeviceId] = useState('');
+  const [isPeerActive, setIsPeerActive] = useState(false);
+  const [displayName, setDisplayName] = useState(recipientName);
   const flatListRef = useRef<FlatList>(null);
+
+  // Fetch true peer display name if cached/different
+  useEffect(() => {
+    if (!recipientId) return;
+    chatService['repository']?.getPeer(recipientId).then((peer: any) => {
+      if (peer && peer.displayName) {
+        setDisplayName(peer.displayName);
+      }
+    }).catch(() => { });
+  }, [recipientId, chatService]);
+
+  // Subscribe to active connection status for this peer
+  useEffect(() => {
+    if (!recipientId) return;
+    const subscription = chatService.observeActiveTransportIds().subscribe({
+      next: (activeIds) => {
+        setIsPeerActive(activeIds.includes(recipientId));
+      },
+      error: (err) => console.error('[ChatScreen] active status check error', err),
+    });
+    return () => subscription.unsubscribe();
+  }, [recipientId, chatService]);
 
   // Native Audio Playback/Recording state
   const [playingAudioId, setPlayingAudioId] = useState<string | null>(null);
@@ -97,10 +143,10 @@ export default function ChatScreen({ route, navigation }: any) {
   useEffect(() => {
     return () => {
       if (soundRef.current) {
-        soundRef.current.unloadAsync().catch(() => {});
+        soundRef.current.unloadAsync().catch(() => { });
       }
       if (recordingRef.current) {
-        recordingRef.current.stopAndUnloadAsync().catch(() => {});
+        recordingRef.current.stopAndUnloadAsync().catch(() => { });
       }
       clearInterval(recordingInterval.current);
     };
@@ -113,7 +159,7 @@ export default function ChatScreen({ route, navigation }: any) {
   useEffect(() => {
     chatService['repository']?.getLocalUser().then((u: any) => {
       if (u) setLocalDeviceId(u._raw?.device_id || '');
-    }).catch(() => {});
+    }).catch(() => { });
   }, [chatService]);
 
   // Subscribe to live messages for this conversation
@@ -139,32 +185,17 @@ export default function ChatScreen({ route, navigation }: any) {
   useFocusEffect(
     useCallback(() => {
       if (recipientId) {
-        chatService.markAsRead(recipientId).catch(() => {});
+        chatService.markAsRead(recipientId).catch(() => { });
       }
     }, [recipientId, chatService])
   );
-
-  const insets = useSafeAreaInsets();
-  const defaultTabBarStyle = {
-    backgroundColor: '#1A1A1A',
-    borderTopColor: '#333',
-    borderTopWidth: 1,
-    height: 60 + insets.bottom,
-    paddingBottom: insets.bottom > 0 ? insets.bottom : 8,
-    paddingTop: 8,
-    position: 'absolute' as const,
-    bottom: 0,
-    left: 0,
-    right: 0,
-  };
-
   // Hide bottom tab bar while this screen is focused
   useFocusEffect(
     useCallback(() => {
       const parent = navigation.getParent();
       parent?.setOptions({ tabBarStyle: { display: 'none' } });
-      return () => parent?.setOptions({ tabBarStyle: defaultTabBarStyle });
-    }, [navigation, defaultTabBarStyle])
+      return () => parent?.setOptions({ tabBarStyle: undefined });
+    }, [navigation])
   );
 
   const checkWifiBeforeSend = async (): Promise<boolean> => {
@@ -178,11 +209,13 @@ export default function ChatScreen({ route, navigation }: any) {
               'Wi-Fi is turned off. Please turn it on to send messages offline.',
               [
                 { text: 'Cancel', style: 'cancel' },
-                { text: 'Turn On', onPress: () => {
-                  if (NativeModules.WifiDirect && typeof NativeModules.WifiDirect.setWifiEnabled === 'function') {
-                    NativeModules.WifiDirect.setWifiEnabled(true).catch(console.error);
+                {
+                  text: 'Turn On', onPress: () => {
+                    if (NativeModules.WifiDirect && typeof NativeModules.WifiDirect.setWifiEnabled === 'function') {
+                      NativeModules.WifiDirect.setWifiEnabled(true).catch(console.error);
+                    }
                   }
-                }}
+                }
               ]
             );
             return false;
@@ -307,7 +340,7 @@ export default function ChatScreen({ route, navigation }: any) {
       clearInterval(recordingInterval.current);
       try {
         await recordingRef.current.stopAndUnloadAsync();
-      } catch {}
+      } catch { }
       recordingRef.current = null;
       setIsRecording(false);
       setRecordingDuration(0);
@@ -382,7 +415,7 @@ export default function ChatScreen({ route, navigation }: any) {
           try {
             await soundRef.current.stopAsync();
             await soundRef.current.unloadAsync();
-          } catch (e) {}
+          } catch (e) { }
           soundRef.current = null;
         }
 
@@ -400,7 +433,7 @@ export default function ChatScreen({ route, navigation }: any) {
                 setPlayingAudioId(null);
                 setAudioProgress(0);
                 if (soundRef.current) {
-                  soundRef.current.unloadAsync().catch(() => {});
+                  soundRef.current.unloadAsync().catch(() => { });
                   soundRef.current = null;
                 }
               }
@@ -504,11 +537,11 @@ export default function ChatScreen({ route, navigation }: any) {
             {isUser && (
               <MaterialCommunityIcons
                 name={
-                  item.status === 'read' || item.status === 'delivered'
+                  item.status === 'read'
                     ? 'check-all'
-                    : item.status === 'sent'
-                    ? 'check'
-                    : 'clock-outline'
+                    : item.status === 'sent' || item.status === 'delivered'
+                      ? 'check'
+                      : 'clock-outline'
                 }
                 size={12}
                 color={item.status === 'read' ? '#02C39A' : '#999'}
@@ -523,9 +556,9 @@ export default function ChatScreen({ route, navigation }: any) {
 
   return (
     <KeyboardAvoidingView
-      behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+      behavior="padding"
       style={styles.container}
-      keyboardVerticalOffset={Platform.OS === 'ios' ? 90 : 0}
+      keyboardVerticalOffset={0}
     >
       <StatusBar barStyle="light-content" backgroundColor="#000000" />
 
@@ -541,10 +574,19 @@ export default function ChatScreen({ route, navigation }: any) {
             style={{ marginLeft: 12 }}
           />
           <View style={styles.userInfo}>
-            <Text style={styles.userName}>{recipientName}</Text>
-            <Text style={styles.userStatus}>
-              {recipientId ? 'Peer-to-peer encrypted' : 'Offline'}
-            </Text>
+            <Text style={styles.userName}>{displayName}</Text>
+            <View style={{ flexDirection: 'row', alignItems: 'center', marginTop: 2 }}>
+              <View style={{
+                width: 8,
+                height: 8,
+                borderRadius: 4,
+                backgroundColor: isPeerActive ? '#2ECC71' : '#757575',
+                marginRight: 6
+              }} />
+              <Text style={styles.userStatus}>
+                {isPeerActive ? 'Active' : 'Inactive'}
+              </Text>
+            </View>
           </View>
           <View style={styles.headerActions}>
             <TouchableOpacity onPress={() => navigation.navigate('SOSModal')}>
@@ -571,81 +613,80 @@ export default function ChatScreen({ route, navigation }: any) {
           renderItem={renderMessageItem}
           keyExtractor={(item) => item.id}
           scrollEnabled
+          style={{ flex: 1 }}
           contentContainerStyle={styles.messageList}
           onContentSizeChange={() => flatListRef.current?.scrollToEnd({ animated: false })}
         />
       )}
 
-      <View style={styles.inputWrapper}>
-        <SafeAreaView edges={['bottom']} style={styles.inputSafeArea}>
-          <View style={styles.inputContainer}>
-            {isRecording ? (
-              <>
-                <TouchableOpacity
-                  style={styles.cancelRecordButton}
-                  onPress={cancelRecording}
-                >
-                  <MaterialCommunityIcons name="trash-can-outline" size={24} color="#FF3B30" />
-                </TouchableOpacity>
+      <View style={[styles.inputWrapper, { paddingBottom: bottomPadding }]}>
+        <View style={styles.inputContainer}>
+              {isRecording ? (
+                <>
+                  <TouchableOpacity
+                    style={styles.cancelRecordButton}
+                    onPress={cancelRecording}
+                  >
+                    <MaterialCommunityIcons name="trash-can-outline" size={24} color="#FF3B30" />
+                  </TouchableOpacity>
 
-                <View style={styles.recordingIndicator}>
-                  <View style={styles.recordingDot} />
-                  <Text style={styles.recordingText}>
-                    Recording {Math.floor(recordingDuration / 60)}:{('0' + (recordingDuration % 60)).slice(-2)}
-                  </Text>
-                </View>
+                  <View style={styles.recordingIndicator}>
+                    <View style={styles.recordingDot} />
+                    <Text style={styles.recordingText}>
+                      Recording {Math.floor(recordingDuration / 60)}:{('0' + (recordingDuration % 60)).slice(-2)}
+                    </Text>
+                  </View>
 
-                <TouchableOpacity
-                  style={[styles.sendButton, styles.sendButtonActive]}
-                  onPress={stopAndSendRecording}
-                >
-                  <MaterialCommunityIcons name="send" size={20} color="#FFF" />
-                </TouchableOpacity>
-              </>
-            ) : (
-              <>
-                <TouchableOpacity
-                  style={styles.attachButton}
-                  onPress={handlePickAttachment}
-                  disabled={isPicking || isSending}
-                >
-                  <MaterialCommunityIcons name="paperclip" size={22} color="#FF8C42" />
-                </TouchableOpacity>
-                <TextInput
-                  style={styles.input}
-                  placeholder="Message..."
-                  placeholderTextColor="#666"
-                  value={inputText}
-                  onChangeText={setInputText}
-                  multiline
-                  editable={!isSending}
-                />
-                {inputText.trim() ? (
                   <TouchableOpacity
                     style={[styles.sendButton, styles.sendButtonActive]}
-                    onPress={handleSendMessage}
-                    disabled={isSending}
+                    onPress={stopAndSendRecording}
                   >
-                    {isSending ? (
-                      <ActivityIndicator size="small" color="#FFF" />
-                    ) : (
-                      <MaterialCommunityIcons name="send" size={20} color="#FFF" />
-                    )}
+                    <MaterialCommunityIcons name="send" size={20} color="#FFF" />
                   </TouchableOpacity>
-                ) : (
+                </>
+              ) : (
+                <>
                   <TouchableOpacity
-                    style={[styles.sendButton, styles.sendButtonActive, { backgroundColor: '#FF8C42' }]}
-                    onPress={startRecording}
-                    disabled={isSending}
+                    style={styles.attachButton}
+                    onPress={handlePickAttachment}
+                    disabled={isPicking || isSending}
                   >
-                    <MaterialCommunityIcons name="microphone" size={22} color="#FFF" />
+                    <MaterialCommunityIcons name="paperclip" size={22} color="#FF8C42" />
                   </TouchableOpacity>
-                )}
-              </>
-            )}
-          </View>
-        </SafeAreaView>
-      </View>
+                  <TextInput
+                    style={styles.input}
+                    placeholder="Message..."
+                    placeholderTextColor="#666"
+                    value={inputText}
+                    onChangeText={setInputText}
+                    multiline
+                    editable={!isSending}
+                  />
+                  {inputText.trim() ? (
+                    <TouchableOpacity
+                      style={[styles.sendButton, styles.sendButtonActive]}
+                      onPress={handleSendMessage}
+                      disabled={isSending}
+                    >
+                      {isSending ? (
+                        <ActivityIndicator size="small" color="#FFF" />
+                      ) : (
+                        <MaterialCommunityIcons name="send" size={20} color="#FFF" />
+                      )}
+                    </TouchableOpacity>
+                  ) : (
+                    <TouchableOpacity
+                      style={[styles.sendButton, styles.sendButtonActive, { backgroundColor: '#FF8C42' }]}
+                      onPress={startRecording}
+                      disabled={isSending}
+                    >
+                      <MaterialCommunityIcons name="microphone" size={22} color="#FFF" />
+                    </TouchableOpacity>
+                  )}
+                </>
+              )}
+            </View>
+        </View>
 
       {/* Image Preview Modal */}
       <Modal visible={previewImage !== null} transparent={true} onRequestClose={() => setPreviewImage(null)}>
@@ -731,9 +772,7 @@ const styles = StyleSheet.create({
   inputWrapper: {
     backgroundColor: '#000000',
   },
-  inputSafeArea: {
-    backgroundColor: '#000000',
-  },
+  inputSafeArea: {},
   messageList: {
     paddingVertical: 12,
     paddingBottom: 16,
