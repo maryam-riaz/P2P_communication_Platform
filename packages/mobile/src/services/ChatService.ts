@@ -23,10 +23,23 @@ export class ChatService {
   private activeTransportsSubject = new BehaviorSubject<string[]>([]);
   private transportLastSeenMap = new Map<string, number>();
   private heartbeatIntervalId: any = null;
+  private secureTransportsList: SecureTransport[] = [];
 
   constructor(private db: Database) {
     this.repository = new MobileRepository(db);
     this.startHeartbeatTimer();
+  }
+
+  registerSecureTransport(transport: SecureTransport) {
+    if (!this.secureTransportsList.includes(transport)) {
+      this.secureTransportsList.push(transport);
+      console.log('[ChatService] SecureTransport registered. Current pool size:', this.secureTransportsList.length);
+    }
+  }
+
+  unregisterSecureTransport(transport: SecureTransport) {
+    this.secureTransportsList = this.secureTransportsList.filter(t => t !== transport);
+    console.log('[ChatService] SecureTransport unregistered. Current pool size:', this.secureTransportsList.length);
   }
 
   private startHeartbeatTimer() {
@@ -34,6 +47,18 @@ export class ChatService {
       const now = Date.now();
       const myUser = await this.repository.getLocalUser();
       const myDeviceId = myUser ? (myUser._raw as any).device_id : 'unknown';
+
+      // ── Self-Healing: Trigger handshake retry for connected raw channels without handshake ──
+      for (const transport of this.secureTransportsList) {
+        if (transport.isConnected() && !transport.isHandshakeComplete()) {
+          console.log('[ChatService] Self-Healing: Connected raw transport found without active handshake. Triggering handshake retry...');
+          try {
+            await transport.establishHandshake();
+          } catch (err) {
+            console.warn('[ChatService] Self-healing handshake retry failed:', err);
+          }
+        }
+      }
 
       for (const [peerId, transport] of Array.from(this.activeTransports.entries())) {
         const lastSeen = this.transportLastSeenMap.get(peerId) || 0;
@@ -129,14 +154,14 @@ export class ChatService {
         ),
         Q.sortBy('created_at', Q.asc)
       )
-      .observe();
+      .observeWithColumns(['sync_status']);
   }
 
   /**
    * Observes all messages and groups them into unique conversations with names and unread counts.
    */
   observeConversations(): Observable<Conversation[]> {
-    return this.db.get<Message>('messages').query(Q.sortBy('created_at', Q.desc)).observe().pipe(
+    return this.db.get<Message>('messages').query(Q.sortBy('created_at', Q.desc)).observeWithColumns(['sync_status']).pipe(
       switchMap((messages) =>
         from(
           (async () => {
@@ -251,7 +276,19 @@ export class ChatService {
     });
 
     // 2. Attempt transmission if peer is active
-    const secureTransport = this.getActiveTransport(recipientId);
+    let secureTransport = this.getActiveTransport(recipientId);
+    
+    // Self-healing: if no active registered transport, check if we have a connected transport that just needs a handshake
+    if (!secureTransport) {
+      const unhandshakedConn = this.secureTransportsList.find(t => t.isConnected() && !t.isHandshakeComplete());
+      if (unhandshakedConn) {
+        console.log(`[ChatService] Outbox activity triggered self-healing handshake for recipient ${recipientId}`);
+        unhandshakedConn.establishHandshake().catch(err => {
+          console.warn('[ChatService] Failed to establish handshake during sendMessage self-healing:', err);
+        });
+      }
+    }
+
     if (secureTransport && secureTransport.isHandshakeComplete()) {
       try {
         const payload = {

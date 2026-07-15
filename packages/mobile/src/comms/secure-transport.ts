@@ -46,6 +46,7 @@ export class SecureTransport {
   private onMessageCallback: ((plaintext: string) => void) | null = null;
   private handshakeCallbacks: (() => void)[] = [];
   private rxBuffer = '';
+  private lastHandshakeSentTime = 0;
 
   constructor(
     private rawTransport: PeerTransport,
@@ -63,6 +64,12 @@ export class SecureTransport {
    * Sends the local public key unencrypted over the active P2P connection.
    */
   async establishHandshake(): Promise<void> {
+    const now = Date.now();
+    if (now - this.lastHandshakeSentTime < 3000) {
+      console.log('[Secure Transport] Handshake request rate-limited (cooldown active).');
+      return;
+    }
+    this.lastHandshakeSentTime = now;
     console.log('[Secure Transport] Initiating unencrypted P2P public key exchange...');
     const keyMsg = `PUBKEY_EXCHANGE:${this.localPublicKeyHex}:${this.localDeviceId}:${this.localDisplayName}\n`;
     await this.rawTransport.send(strToBytes(keyMsg));
@@ -130,6 +137,11 @@ export class SecureTransport {
       this.handshakeCompleted = true;
       console.log(`[Secure Transport] Handshake complete! Received remote ID: ${this.remoteDeviceId}, display name: ${this.remoteDisplayName}`);
 
+      // Respond by triggering our own handshake key exchange (will be rate-limited by 3s cooldown if we just sent one)
+      this.establishHandshake().catch((err) => {
+        console.warn('[Secure Transport] Failed replying to public key exchange:', err);
+      });
+
       // Trigger all pending handshake ready callbacks
       this.handshakeCallbacks.forEach((cb) => cb());
       return;
@@ -152,6 +164,10 @@ export class SecureTransport {
 
   isHandshakeComplete(): boolean {
     return this.handshakeCompleted;
+  }
+
+  isConnected(): boolean {
+    return this.rawTransport.isConnected();
   }
 
   getRemotePublicKey(): string | null {

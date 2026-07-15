@@ -6,12 +6,9 @@ import {
   StatusBar,
   TouchableOpacity,
   Platform,
-  Animated,
-  Dimensions,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useSelector, useDispatch } from 'react-redux';
-import MapView, { Marker, Circle, PROVIDER_DEFAULT } from 'react-native-maps';
 import { RootState } from '../../redux/store';
 import { setUserLocation, setNearbyUsers, setNearbyRescuers } from '../../redux/slices/mapSlice';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
@@ -20,10 +17,163 @@ import { BleManager } from 'react-native-ble-plx';
 import { useService } from '../../hooks/useService';
 import { MapService, PeerPin } from '../../services/MapService';
 import { SosService } from '../../services/SosService';
+import { WebView } from 'react-native-webview';
+import { LEAFLET_CSS, LEAFLET_JS } from './leafletAssets';
+import { PAKISTAN_PROVINCES, PAKISTAN_CITIES } from './pakistanMapData';
 
-// Default map coordinate fallback (e.g. San Francisco disaster simulation center)
-const DEFAULT_LAT = 37.7749;
-const DEFAULT_LNG = -122.4194;
+
+
+// Build Leaflet HTML using string concatenation (NOT template literals)
+// to avoid backtick/interpolation issues with minified Leaflet source
+function buildLeafletHtml(defaultLat: number, defaultLng: number, provincesJson: string, citiesJson: string): string {
+  return [
+    '<!DOCTYPE html>',
+    '<html>',
+    '<head>',
+    '<meta charset="utf-8">',
+    '<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />',
+    '<style>' + LEAFLET_CSS + '</style>',
+    '<script>' + LEAFLET_JS + '<\/script>',
+    '<style>',
+    'html, body {',
+    '  margin: 0; padding: 0;',
+    '  height: 100vh; width: 100vw;',
+    '  overflow: hidden;',
+    '  background-color: #111111;',
+    '}',
+    '#map {',
+    '  position: absolute; top: 0; left: 0;',
+    '  width: 100vw; height: 100vh;',
+    '  background-color: #111111;',
+    '}',
+    '@keyframes leaflet-pulse {',
+    '  0% { transform: scale(0.8); opacity: 0.9; }',
+    '  100% { transform: scale(2.4); opacity: 0; }',
+    '}',
+    '.leaflet-custom-marker { background: none !important; border: none !important; }',
+    '<\/style>',
+    '<\/head>',
+    '<body>',
+    '<div id="map"></div>',
+    '<script>',
+    // Console/error bridge
+    'window.onerror = function(msg, src, line, col, err) {',
+    '  try { window.ReactNativeWebView.postMessage(JSON.stringify({ type: "error", message: String(msg), source: src, lineno: line, colno: col })); } catch(e) {}',
+    '  return true;',
+    '};',
+    'var _olog = console.log;',
+    'console.log = function() { try { window.ReactNativeWebView.postMessage(JSON.stringify({ type: "log", message: Array.prototype.slice.call(arguments).join(" ") })); } catch(e) {} _olog.apply(console, arguments); };',
+    'var _oerr = console.error;',
+    'console.error = function() { try { window.ReactNativeWebView.postMessage(JSON.stringify({ type: "error_log", message: Array.prototype.slice.call(arguments).join(" ") })); } catch(e) {} _oerr.apply(console, arguments); };',
+    // Map state
+    'var map = null;',
+    'var markers = [];',
+    'var mapReady = false;',
+    'var boundsFitted = false;',
+    // initMap
+    'function initMap(lat, lng) {',
+    '  if (mapReady) { try { map.setView([lat, lng]); } catch(e) {} return; }',
+    '  try {',
+    '    map = L.map("map", { zoomControl: false, attributionControl: false, maxZoom: 24 }).setView([lat, lng], 5);',
+    '    var darkPixel = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScAAAAAElFTkSuQmCC";',
+    '    L.tileLayer("https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png", { maxZoom: 24, maxNativeZoom: 20, errorTileUrl: darkPixel }).addTo(map);',
+    '    L.control.zoom({ position: "bottomright" }).addTo(map);',
+    '    mapReady = true;',
+    '    console.log("[Map] Initialized at " + lat + "," + lng);',
+    // Draw Pakistan province outlines
+    '    try {',
+    '      var provinces = ' + provincesJson + ';',
+    '      provinces.forEach(function(prov) {',
+    '        L.polygon(prov.coordinates, {',
+    '          color: prov.color,',
+    '          weight: 1.5,',
+    '          fillColor: prov.color,',
+    '          fillOpacity: 0.04',
+    '        }).addTo(map).bindTooltip(prov.name, { permanent: false, direction: "center" });',
+    '      });',
+    '    } catch(err) { console.error("[Map] Province rendering failed: " + err.message); }',
+    // Draw Pakistan major cities
+    '    try {',
+    '      var cities = ' + citiesJson + ';',
+    '      cities.forEach(function(city) {',
+    '        var cityIcon = L.divIcon({',
+    '          className: "leaflet-custom-marker",',
+    '          html: "<div style=\'display:flex;flex-direction:column;align-items:center;justify-content:center;\'><div style=\'width:5px;height:5px;border-radius:50%;background-color:#444;border:1px solid #777;\'></div><div style=\'font-size:9px;color:#888;margin-top:1px;white-space:nowrap;font-family:sans-serif;text-shadow:0 0 2px #000;pointer-events:none;\'>" + city.name + "</div></div>",',
+    '          iconSize: [80, 25],',
+    '          iconAnchor: [40, 3]',
+    '        });',
+    '        L.marker([city.lat, city.lng], { icon: cityIcon }).addTo(map)',
+    '          .bindPopup("<b>" + city.name + "</b><br/>" + city.description);',
+    '      });',
+    '    } catch(err) { console.error("[Map] City rendering failed: " + err.message); }',
+    '  } catch(e) { console.error("[Map] initMap failed: " + e.message); }',
+    '}',
+    // updateMap
+    'function updateMap(baseLat, baseLng, peersJson, sosJson) {',
+    '  initMap(baseLat, baseLng);',
+    '  if (!mapReady) { console.error("[Map] not ready, skipping update"); return; }',
+    '  markers.forEach(function(m) { try { m.remove(); } catch(e) {} });',
+    '  markers = [];',
+    '  var meHtml = "<div style=\'position:relative;width:30px;height:30px;display:flex;justify-content:center;align-items:center;\'><div style=\'position:absolute;width:22px;height:22px;border-radius:50%;border:2px solid #00D4FF;background-color:rgba(0,212,255,0.2);animation:leaflet-pulse 2s infinite;\'></div><div style=\'width:10px;height:10px;border-radius:50%;background-color:#00D4FF;border:2px solid #FFF;box-shadow:0 0 6px #00D4FF;z-index:10;\'></div></div>";',
+    '  var meIcon = L.divIcon({ className: "leaflet-custom-marker", html: meHtml, iconSize: [30,30], iconAnchor: [15,15] });',
+    '  markers.push(L.marker([baseLat, baseLng], { icon: meIcon }).addTo(map).bindPopup("<b>Me (You)</b>"));',
+    '  try {',
+    '    var peers = JSON.parse(peersJson);',
+    '    peers.forEach(function(peer) {',
+    '      var isRes = peer.role === "responder" || peer.role === "admin";',
+    '      var col = isRes ? "#FF4081" : "#FF8C42";',
+    '      var nm = isRes ? "Rescuer" : "Victim";',
+    '      var ph = "<div style=\'position:relative;width:30px;height:30px;display:flex;justify-content:center;align-items:center;\'><div style=\'position:absolute;width:22px;height:22px;border-radius:50%;border:2px solid " + col + ";background-color:" + col + "33;animation:leaflet-pulse 2.5s infinite;\'></div><div style=\'width:10px;height:10px;border-radius:50%;background-color:" + col + ";border:2px solid #FFF;box-shadow:0 0 6px " + col + ";z-index:10;\'></div></div>";',
+    '      var pi = L.divIcon({ className: "leaflet-custom-marker", html: ph, iconSize: [30,30], iconAnchor: [15,15] });',
+    '      var pm = L.marker([peer.lat, peer.lng], { icon: pi }).addTo(map);',
+    '      pm.bindPopup("<b>" + peer.name + "</b><br/>" + nm + "<br/>" + peer.distance.toFixed(1) + "m");',
+    '      markers.push(pm);',
+    '      markers.push(L.circle([peer.lat, peer.lng], { color: col, fillColor: col, fillOpacity: 0.08, weight: 1, radius: peer.distance }).addTo(map));',
+    '    });',
+    '  } catch(e) { console.error("[Map] peers parse error: " + e.message); }',
+    '  try {',
+    '    var sos = JSON.parse(sosJson);',
+    '    sos.forEach(function(s) {',
+    '      var sh = "<div style=\'position:relative;width:30px;height:30px;display:flex;justify-content:center;align-items:center;\'><div style=\'position:absolute;width:26px;height:26px;border-radius:50%;border:2px solid #FF3B30;background-color:rgba(255,59,48,0.2);animation:leaflet-pulse 1.5s infinite;\'></div><div style=\'width:10px;height:10px;background-color:#FF3B30;border:2px solid #FFF;transform:rotate(45deg);box-shadow:0 0 6px #FF3B30;z-index:10;\'></div></div>";',
+    '      var si = L.divIcon({ className: "leaflet-custom-marker", html: sh, iconSize: [30,30], iconAnchor: [15,15] });',
+    '      markers.push(L.marker([s.lat, s.lng], { icon: si }).addTo(map).bindPopup("<b style=\'color:#FF3B30;\'>SOS!</b><br/>" + (s.description || "Emergency")));',
+    '    });',
+    '  } catch(e) { console.error("[Map] sos parse error: " + e.message); }',
+    '  if (!boundsFitted) {',
+    '    centerOnUsers();',
+    '    boundsFitted = true;',
+    '  }',
+    '}',
+    // centerOnUsers function
+    'function centerOnUsers() {',
+    '  if (!map || !mapReady) return;',
+    '  var boundsPoints = [];',
+    '  markers.forEach(function(m) {',
+    '    if (m && typeof m.getLatLng === "function") {',
+    '      boundsPoints.push(m.getLatLng());',
+    '    }',
+    '  });',
+    '  if (boundsPoints.length > 0) {',
+    '    if (boundsPoints.length > 1) {',
+    '      map.fitBounds(boundsPoints, { padding: [50, 50], maxZoom: 16 });',
+    '    } else {',
+    '      map.setView(boundsPoints[0], 14);',
+    '    }',
+    '  }',
+    '}',
+    // Auto-init on load
+    'document.addEventListener("DOMContentLoaded", function() {',
+    '  initMap(' + defaultLat + ', ' + defaultLng + ');',
+    '});',
+    '<\/script>',
+    '<\/body>',
+    '<\/html>',
+  ].join('\n');
+}
+
+// Default map coordinate fallback (Islamabad, Pakistan)
+const DEFAULT_LAT = 33.6844;
+const DEFAULT_LNG = 73.0479;
 
 function rssiToDistance(rssi: number): number {
   const A = -59;
@@ -40,46 +190,18 @@ function getStableAngleForPeer(deviceId: string): number {
   return Math.abs(hash % 360) * (Math.PI / 180);
 }
 
-// ─── Pulsing Sonar Ripple Component ──────────────────────────────────────────
-const SonarPulse = ({ color }: { color: string }) => {
-  const scaleValue = useRef(new Animated.Value(1)).current;
-  const opacityValue = useRef(new Animated.Value(0.8)).current;
+// Build the full HTML once — safely using array join, no template literals
+const LEAFLET_HTML = buildLeafletHtml(
+  DEFAULT_LAT,
+  DEFAULT_LNG,
+  JSON.stringify(PAKISTAN_PROVINCES),
+  JSON.stringify(PAKISTAN_CITIES)
+);
 
-  useEffect(() => {
-    Animated.loop(
-      Animated.parallel([
-        Animated.timing(scaleValue, {
-          toValue: 4,
-          duration: 2500,
-          useNativeDriver: true,
-        }),
-        Animated.timing(opacityValue, {
-          toValue: 0,
-          duration: 2500,
-          useNativeDriver: true,
-        }),
-      ])
-    ).start();
-  }, [scaleValue, opacityValue]);
-
-  return (
-    <Animated.View
-      style={[
-        styles.pulseCircle,
-        {
-          transform: [{ scale: scaleValue }],
-          opacity: opacityValue,
-          borderColor: color,
-          backgroundColor: color + '33', // 20% opacity hex
-        },
-      ]}
-    />
-  );
-};
 
 export default function MapScreen({ navigation }: any) {
   const dispatch = useDispatch();
-  const mapRef = useRef<MapView>(null);
+  const webViewRef = useRef<WebView>(null);
 
   const { userLocation, nearbyUsers, nearbyRescuers } = useSelector(
     (state: RootState) => state.map
@@ -93,9 +215,11 @@ export default function MapScreen({ navigation }: any) {
   const [peerCount, setPeerCount] = useState(0);
 
   // Derived relative locations state
-  const [mySolvedCoords, setMySolvedCoords] = useState<{ latitude: number; longitude: number } | null>(null);
+  const [mySolvedCoords, setMySolvedCoords] = useState<{ latitude: number; longitude: number }>({
+    latitude: DEFAULT_LAT,
+    longitude: DEFAULT_LNG,
+  });
   const [solvedPeers, setSolvedPeers] = useState<any[]>([]);
-  const [isMapReady, setIsMapReady] = useState(false);
   const [wifiEnabled, setWifiEnabled] = useState(true);
   const [gpsEnabled, setGpsEnabled] = useState(true);
   const [bluetoothEnabled, setBluetoothEnabled] = useState(true);
@@ -190,7 +314,7 @@ export default function MapScreen({ navigation }: any) {
       peerSub.unsubscribe();
       sosSub.unsubscribe();
     };
-  }, [mapService, sosService]);
+  }, [mapService, sosService, dispatch]);
 
   // ─── Solve Localization Layout ───────────────────────────────────────────────
   useEffect(() => {
@@ -274,43 +398,61 @@ export default function MapScreen({ navigation }: any) {
 
   }, [userLocation, rawPeers, dispatch]);
 
-  const hasCenteredRef = useRef(false);
+  // Inject coordinate updates to WebView Leaflet Map
+  const handleUpdateWebView = useCallback(() => {
+    if (!webViewRef.current) return;
 
-  const handleCenterMap = useCallback(() => {
-    if (!mySolvedCoords || !mapRef.current || !isMapReady) return;
+    const peersData = JSON.stringify(
+      solvedPeers.map(p => ({
+        id: p.id,
+        name: p.name,
+        role: p.role,
+        rssi: p.rssi,
+        distance: p.distance,
+        lat: p.location.latitude,
+        lng: p.location.longitude,
+      }))
+    );
 
-    const coordsToFit = [{ latitude: mySolvedCoords.latitude, longitude: mySolvedCoords.longitude }];
-    solvedPeers.forEach((p) => {
-      if (p.location && p.location.latitude && p.location.longitude) {
-        coordsToFit.push(p.location);
-      }
-    });
+    const sosData = JSON.stringify(
+      sosPins.map(s => ({
+        id: s.id,
+        lat: s.lat,
+        lng: s.lng,
+        description: (s._raw as any).description,
+      }))
+    );
 
-    if (coordsToFit.length > 1) {
-      mapRef.current.fitToCoordinates(coordsToFit, {
-        edgePadding: { top: 120, right: 120, bottom: 120, left: 120 },
-        animated: true,
-      });
-    } else {
-      mapRef.current.animateToRegion({
-        latitude: mySolvedCoords.latitude,
-        longitude: mySolvedCoords.longitude,
-        latitudeDelta: 0.015,
-        longitudeDelta: 0.015,
-      }, 1000);
-    }
-  }, [mySolvedCoords, solvedPeers, isMapReady]);
+    const jsCode = `updateMap(${mySolvedCoords.latitude}, ${mySolvedCoords.longitude}, '${peersData}', '${sosData}');`;
+    webViewRef.current.injectJavaScript(jsCode);
+  }, [mySolvedCoords, solvedPeers, sosPins]);
 
-  // Center map on local solved coordinates and fit to show all peers (ONLY on first load)
+  // Push updates to Leaflet on state changes
   useEffect(() => {
-    if (mySolvedCoords && isMapReady && !hasCenteredRef.current) {
-      handleCenterMap();
-      hasCenteredRef.current = true;
-    }
-  }, [mySolvedCoords, isMapReady, handleCenterMap]);
+    handleUpdateWebView();
+  }, [mySolvedCoords, solvedPeers, sosPins, handleUpdateWebView]);
 
-  const handleMarkerPress = (person: any) => {
-    navigation.navigate('Chat', { recipientId: person.id, recipientName: person.name });
+  const handleCenterMap = () => {
+    if (webViewRef.current) {
+      webViewRef.current.injectJavaScript('centerOnUsers();');
+    }
+  };
+
+  const handleWebViewMessage = (event: any) => {
+    try {
+      const data = JSON.parse(event.nativeEvent.data);
+      if (data.type === 'chat') {
+        navigation.navigate('Chat', { recipientId: data.id, recipientName: data.name });
+      } else if (data.type === 'error') {
+        console.warn('[WebView JavaScript Error]', data.message, 'at', data.source, 'line', data.lineno);
+      } else if (data.type === 'log') {
+        console.log('[WebView Console Log]', data.message);
+      } else if (data.type === 'error_log') {
+        console.warn('[WebView Console Error]', data.message);
+      }
+    } catch (e) {
+      console.warn('[MapScreen] Failed to handle WebView message:', e);
+    }
   };
 
   const hasOwnGps = userLocation && userLocation.latitude && userLocation.longitude;
@@ -346,79 +488,23 @@ export default function MapScreen({ navigation }: any) {
         </View>
       )}
 
-      {/* Main Interactive Map View */}
-      {mySolvedCoords && (
-        <MapView
-          ref={mapRef}
+      {/* WebView Leaflet Map rendering */}
+      <View style={styles.mapContainer}>
+        <WebView
+          ref={webViewRef}
+          source={{ html: LEAFLET_HTML, baseUrl: 'about:blank' }}
           style={styles.map}
-          provider={PROVIDER_DEFAULT}
-          customMapStyle={darkMapStyle}
-          onMapReady={() => setIsMapReady(true)}
-          initialRegion={{
-            latitude: mySolvedCoords.latitude,
-            longitude: mySolvedCoords.longitude,
-            latitudeDelta: 0.015,
-            longitudeDelta: 0.015,
-          }}
-        >
-          {/* 1. Self Marker */}
-          <Marker coordinate={mySolvedCoords} title="Me" zIndex={10}>
-            <View style={styles.markerContainer}>
-              <View style={[styles.pulseCircle, { borderColor: '#02C39A', backgroundColor: '#02C39A33', transform: [{ scale: 1.5 }] }]} />
-              <View style={[styles.markerDot, { backgroundColor: '#02C39A' }]} />
-            </View>
-          </Marker>
-
-          {/* 2. Discovered Peer Markers */}
-          {solvedPeers.map((peer) => {
-            const isResponder = peer.role === 'responder' || peer.role === 'admin';
-            const color = isResponder ? '#E0005C' : '#FF8C42';
-            return (
-              <React.Fragment key={peer.id}>
-                {/* Draw signal distance range circle around peers */}
-                <Circle
-                  center={peer.location}
-                  radius={peer.distance}
-                  fillColor={color + '1A'}
-                  strokeColor={color + '4D'}
-                  strokeWidth={1}
-                />
-                <Marker
-                  coordinate={peer.location}
-                  title={peer.name}
-                  description={`${isResponder ? 'Rescuer' : 'Victim'} • Est. Dist: ${peer.distance.toFixed(1)}m`}
-                  onCalloutPress={() => handleMarkerPress(peer)}
-                  zIndex={5}
-                >
-                  <View style={styles.markerContainer}>
-                    <View style={[styles.pulseCircle, { borderColor: color, backgroundColor: color + '33', transform: [{ scale: 1.5 }] }]} />
-                    <View style={[styles.markerDot, { backgroundColor: color }]} />
-                  </View>
-                </Marker>
-              </React.Fragment>
-            );
-          })}
-
-          {/* 3. SOS Incident Markers */}
-          {sosPins.map((sos) => {
-            const coords = { latitude: sos.lat, longitude: sos.lng };
-            return (
-              <Marker
-                key={sos.id}
-                coordinate={coords}
-                title="🚨 SOS ALERT!"
-                description={(sos._raw as any).description || 'Emergency assistance requested'}
-                zIndex={8}
-              >
-                <View style={styles.markerContainer}>
-                  <SonarPulse color="#FF3B30" />
-                  <View style={[styles.markerDot, { backgroundColor: '#FF3B30', borderRadius: 0, transform: [{ rotate: '45deg' }] }]} />
-                </View>
-              </Marker>
-            );
-          })}
-        </MapView>
-      )}
+          onMessage={handleWebViewMessage}
+          onLoadEnd={handleUpdateWebView}
+          originWhitelist={['*']}
+          javaScriptEnabled={true}
+          domStorageEnabled={true}
+          mixedContentMode="always"
+          allowUniversalAccessFromFileURLs={true}
+          allowFileAccessFromFileURLs={true}
+          allowFileAccess={true}
+        />
+      </View>
 
       {/* Floating Connection Indicator */}
       <View style={styles.connectionBadge}>
@@ -428,15 +514,13 @@ export default function MapScreen({ navigation }: any) {
       </View>
 
       {/* Floating Center Map Button */}
-      {mySolvedCoords && (
-        <TouchableOpacity
-          style={styles.centerMapButton}
-          onPress={handleCenterMap}
-          activeOpacity={0.8}
-        >
-          <MaterialCommunityIcons name="crosshairs-gps" size={22} color="#FFF" />
-        </TouchableOpacity>
-      )}
+      <TouchableOpacity
+        style={styles.centerMapButton}
+        onPress={handleCenterMap}
+        activeOpacity={0.8}
+      >
+        <MaterialCommunityIcons name="crosshairs-gps" size={22} color="#FFF" />
+      </TouchableOpacity>
 
       <SafeAreaView style={styles.bottomWrapper}>
         <View style={styles.statsContainer}>
@@ -462,19 +546,6 @@ export default function MapScreen({ navigation }: any) {
     </View>
   );
 }
-
-// Curated Sleek Dark Map design configuration for MapView
-const darkMapStyle = [
-  { "elementType": "geometry", "stylers": [{ "color": "#1A1A1A" }] },
-  { "elementType": "labels.text.fill", "stylers": [{ "color": "#757575" }] },
-  { "elementType": "labels.text.stroke", "stylers": [{ "color": "#1A1A1A" }] },
-  { "featureType": "administrative", "elementType": "geometry", "stylers": [{ "color": "#333333" }] },
-  { "featureType": "landscape", "elementType": "geometry", "stylers": [{ "color": "#1F1F1F" }] },
-  { "featureType": "poi", "elementType": "geometry", "stylers": [{ "color": "#1E1E1E" }] },
-  { "featureType": "road", "elementType": "geometry.fill", "stylers": [{ "color": "#2C2C2C" }] },
-  { "featureType": "road", "elementType": "geometry.stroke", "stylers": [{ "color": "#1A1A1A" }] },
-  { "featureType": "water", "elementType": "geometry", "stylers": [{ "color": "#0F0F0F" }] }
-];
 
 const styles = StyleSheet.create({
   container: {
@@ -517,32 +588,17 @@ const styles = StyleSheet.create({
     fontWeight: '700',
     color: '#888',
   },
-  map: {
+  mapContainer: {
     flex: 1,
+    backgroundColor: '#111111',
+  },
+  map: {
+    width: '100%',
+    height: '100%',
+    backgroundColor: '#111111',
   },
   bottomWrapper: {
     backgroundColor: '#000000',
-  },
-  markerContainer: {
-    width: 60,
-    height: 60,
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  pulseCircle: {
-    position: 'absolute',
-    width: 14,
-    height: 14,
-    borderRadius: 7,
-    borderWidth: 1.5,
-  },
-  markerDot: {
-    width: 12,
-    height: 12,
-    borderRadius: 6,
-    borderWidth: 2,
-    borderColor: '#FFF',
-    zIndex: 2,
   },
   connectionBadge: {
     position: 'absolute',
@@ -608,7 +664,7 @@ const styles = StyleSheet.create({
   statRescuersNumber: {
     fontSize: 20,
     fontWeight: '700',
-    color: '#E0005C',
+    color: '#FF4081',
   },
   messageButton: {
     flexDirection: 'row',

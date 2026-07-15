@@ -155,6 +155,7 @@ export function useInitializeServices() {
 
         // Instantiate Phase 3 Cryptographic secure channel
         currentSecureTransport = new SecureTransport(currentRawTransport, privateKey, publicKey, deviceId, displayName);
+        chatService.registerSecureTransport(currentSecureTransport);
 
         // ── CRITICAL: Register SecureTransport callbacks BEFORE any TCP socket opens ──
         // This prevents the BUG 4 race where PUBKEY_EXCHANGE arrives before listeners are ready.
@@ -492,7 +493,10 @@ export function useInitializeServices() {
           await currentRawTransport.disconnect();
           currentRawTransport = undefined;
         }
-        currentSecureTransport = undefined;
+        if (currentSecureTransport) {
+          chatService.unregisterSecureTransport(currentSecureTransport);
+          currentSecureTransport = undefined;
+        }
         // Stop the heartbeat timer in ChatService
         chatService.destroy();
       };

@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useContext } from 'react';
+import React, { useEffect, useState, useContext, useRef } from 'react';
 import {
   View,
   Text,
@@ -18,8 +18,8 @@ import { SosService } from '../../services/SosService';
 import { ServiceContext } from '../../context/ServiceContext';
 import { MobileRepository } from '../../db/repository';
 
-const SONAR_SIZE = 280;
-const SONAR_RADIUS = SONAR_SIZE / 2;
+const DEFAULT_LAT = 37.7749;
+const DEFAULT_LNG = -122.4194;
 
 function rssiToDistance(rssi: number): number {
   const A = -59;
@@ -50,6 +50,13 @@ export default function MapScreen({ navigation }: any) {
   const [sosPins, setSosPins] = useState<any[]>([]);
   const [peerCount, setPeerCount] = useState(0);
 
+  // Leaflet initialization states and refs
+  const [leafletLoaded, setLeafletLoaded] = useState(false);
+  const mapContainerRef = useRef<any>(null);
+  const leafletMapRef = useRef<any>(null);
+  const leafletMarkersRef = useRef<any[]>([]);
+
+  // Simulate a discovered peer locally in the sandbox
   const handleSimulatePeer = async () => {
     if (services && services.database) {
       const peersRepo = new MobileRepository(services.database);
@@ -70,10 +77,10 @@ export default function MapScreen({ navigation }: any) {
       const mockRssi = -40 - Math.floor(Math.random() * 50);
       mapService.updatePeerRssi(mockDeviceId, mockRssi);
 
-      const baseLat = userLocation?.latitude || 37.7749;
-      const baseLng = userLocation?.longitude || -122.4194;
-      const offsetLat = (Math.random() - 0.5) * 0.02;
-      const offsetLng = (Math.random() - 0.5) * 0.02;
+      const baseLat = userLocation?.latitude || DEFAULT_LAT;
+      const baseLng = userLocation?.longitude || DEFAULT_LNG;
+      const offsetLat = (Math.random() - 0.5) * 0.005;
+      const offsetLng = (Math.random() - 0.5) * 0.005;
 
       await peersRepo.updatePeerLocation(
         mockDeviceId,
@@ -83,6 +90,33 @@ export default function MapScreen({ navigation }: any) {
     }
   };
 
+  // Load Leaflet JS & CSS dynamically from CDN
+  useEffect(() => {
+    if (Platform.OS !== 'web') return;
+
+    if (!document.getElementById('leaflet-css')) {
+      const link = document.createElement('link');
+      link.id = 'leaflet-css';
+      link.rel = 'stylesheet';
+      link.href = 'https://unpkg.com/leaflet@1.9.4/dist/leaflet.css';
+      document.head.appendChild(link);
+    }
+
+    if ((window as any).L) {
+      setLeafletLoaded(true);
+      return;
+    }
+
+    const script = document.createElement('script');
+    script.src = 'https://unpkg.com/leaflet@1.9.4/dist/leaflet.js';
+    script.async = true;
+    script.onload = () => {
+      setLeafletLoaded(true);
+    };
+    document.head.appendChild(script);
+  }, []);
+
+  // Set up service subscriptions
   useEffect(() => {
     // 1. Start location tracking on Web
     const startTracking = async () => {
@@ -109,17 +143,43 @@ export default function MapScreen({ navigation }: any) {
       setRawPeers(peers);
       setPeerCount(peers.length);
       
-      const victims = peers.filter(p => p.role === 'user').map(p => ({
-        id: p.deviceId,
-        name: p.displayName,
-        location: { latitude: p.lat || 0, longitude: p.lng || 0 }
-      }));
+      const hasOwnGps = userLocation && userLocation.latitude && userLocation.longitude;
+      const baseLat = hasOwnGps ? userLocation.latitude : DEFAULT_LAT;
+      const baseLng = hasOwnGps ? userLocation.longitude : DEFAULT_LNG;
 
-      const responders = peers.filter(p => p.role === 'responder' || p.role === 'admin').map(p => ({
-        id: p.deviceId,
-        name: p.displayName,
-        location: { latitude: p.lat || 0, longitude: p.lng || 0 }
-      }));
+      const victims = peers.filter(p => p.role === 'user').map(p => {
+        let lat = p.lat;
+        let lng = p.lng;
+        if (lat === null || lng === null) {
+          const d = rssiToDistance(p.rssi);
+          const angle = getStableAngleForPeer(p.deviceId);
+          lat = baseLat + (d / 111111) * Math.sin(angle);
+          lng = baseLng + (d / (111111 * Math.cos(baseLat * (Math.PI / 180)))) * Math.cos(angle);
+        }
+        return {
+          id: p.deviceId,
+          name: p.displayName,
+          location: { latitude: lat, longitude: lng },
+          distance: rssiToDistance(p.rssi),
+        };
+      });
+
+      const responders = peers.filter(p => p.role === 'responder' || p.role === 'admin').map(p => {
+        let lat = p.lat;
+        let lng = p.lng;
+        if (lat === null || lng === null) {
+          const d = rssiToDistance(p.rssi);
+          const angle = getStableAngleForPeer(p.deviceId);
+          lat = baseLat + (d / 111111) * Math.sin(angle);
+          lng = baseLng + (d / (111111 * Math.cos(baseLat * (Math.PI / 180)))) * Math.cos(angle);
+        }
+        return {
+          id: p.deviceId,
+          name: p.displayName,
+          location: { latitude: lat, longitude: lng },
+          distance: rssiToDistance(p.rssi),
+        };
+      });
 
       dispatch(setNearbyUsers(victims as any));
       dispatch(setNearbyRescuers(responders as any));
@@ -136,7 +196,191 @@ export default function MapScreen({ navigation }: any) {
       peerSub.unsubscribe();
       sosSub.unsubscribe();
     };
-  }, [mapService, sosService]);
+  }, [mapService, sosService, userLocation, dispatch]);
+
+  // Solve location states
+  const hasOwnGps = userLocation && userLocation.latitude && userLocation.longitude;
+  let baseLat = hasOwnGps ? userLocation.latitude : null;
+  let baseLng = hasOwnGps ? userLocation.longitude : null;
+
+  if (!hasOwnGps) {
+    let sumLat = 0;
+    let sumLng = 0;
+    let sumWeights = 0;
+
+    rawPeers.forEach((p) => {
+      if (p.lat !== null && p.lng !== null) {
+        const d = rssiToDistance(p.rssi);
+        const weight = 1 / (d * d || 0.1);
+        sumLat += p.lat * weight;
+        sumLng += p.lng * weight;
+        sumWeights += weight;
+      }
+    });
+
+    if (sumWeights > 0) {
+      baseLat = sumLat / sumWeights;
+      baseLng = sumLng / sumWeights;
+    } else {
+      baseLat = DEFAULT_LAT;
+      baseLng = DEFAULT_LNG;
+    }
+  }
+
+  const seenIds = new Set<string>();
+  const resolvedPeers = rawPeers
+    .filter((p) => {
+      if (seenIds.has(p.deviceId)) return false;
+      seenIds.add(p.deviceId);
+      return true;
+    })
+    .map((p) => {
+      let peerLat = p.lat;
+      let peerLng = p.lng;
+
+      if (peerLat === null || peerLng === null) {
+        const d = rssiToDistance(p.rssi);
+        const angle = getStableAngleForPeer(p.deviceId);
+        const latOffset = (d / 111111) * Math.sin(angle);
+        const lngOffset = (d / (111111 * Math.cos(baseLat! * (Math.PI / 180)))) * Math.cos(angle);
+        peerLat = baseLat! + latOffset;
+        peerLng = baseLng! + lngOffset;
+      }
+
+      return {
+        id: p.deviceId,
+        name: p.displayName,
+        role: p.role,
+        rssi: p.rssi,
+        distance: rssiToDistance(p.rssi),
+        location: { latitude: peerLat, longitude: peerLng },
+      };
+    });
+
+  // Render Leaflet map & markers
+  useEffect(() => {
+    if (!leafletLoaded || !mapContainerRef.current) return;
+
+    const L = (window as any).L;
+    if (!L) return;
+
+    if (!leafletMapRef.current) {
+      leafletMapRef.current = L.map(mapContainerRef.current, {
+        zoomControl: false,
+        attributionControl: false,
+      }).setView([baseLat, baseLng], 14);
+
+      L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
+        maxZoom: 20,
+      }).addTo(leafletMapRef.current);
+
+      L.control.zoom({
+        position: 'bottomright'
+      }).addTo(leafletMapRef.current);
+    } else {
+      leafletMapRef.current.setView([baseLat, baseLng]);
+    }
+
+    const map = leafletMapRef.current;
+
+    // Clear old markers
+    leafletMarkersRef.current.forEach((marker) => marker.remove());
+    leafletMarkersRef.current = [];
+
+    // 1. Me (User) marker -> Blue/Cyan
+    const meHtml = `
+      <div style="position: relative; width: 30px; height: 30px; display: flex; justify-content: center; align-items: center;">
+        <div style="position: absolute; width: 22px; height: 22px; border-radius: 50%; border: 2px solid #00D4FF; background-color: rgba(0, 212, 255, 0.2); animation: leaflet-pulse 2s infinite;"></div>
+        <div style="width: 10px; height: 10px; border-radius: 50%; background-color: #00D4FF; border: 2px solid #FFF; box-shadow: 0 0 6px #00D4FF; z-index: 10;"></div>
+      </div>
+    `;
+    const meIcon = L.divIcon({
+      className: 'leaflet-custom-me-marker',
+      html: meHtml,
+      iconSize: [30, 30],
+      iconAnchor: [15, 15]
+    });
+    const meMarker = L.marker([baseLat, baseLng], { icon: meIcon })
+      .addTo(map)
+      .bindPopup('<b>Me (You)</b><br/>Blue/Cyan Pin');
+    leafletMarkersRef.current.push(meMarker);
+
+    // 2. Discovered Peer markers -> Rescuers Pink, Victims Orange
+    resolvedPeers.forEach((peer) => {
+      const isResponder = peer.role === 'responder' || peer.role === 'admin';
+      const color = isResponder ? '#FF4081' : '#FF8C42';
+      const roleName = isResponder ? 'Rescuer' : 'Victim';
+
+      const peerHtml = `
+        <div style="position: relative; width: 30px; height: 30px; display: flex; justify-content: center; align-items: center;">
+          <div style="position: absolute; width: 22px; height: 22px; border-radius: 50%; border: 2px solid ${color}; background-color: ${color}33; animation: leaflet-pulse 2.5s infinite;"></div>
+          <div style="width: 10px; height: 10px; border-radius: 50%; background-color: ${color}; border: 2px solid #FFF; box-shadow: 0 0 6px ${color}; z-index: 10;"></div>
+        </div>
+      `;
+      const peerIcon = L.divIcon({
+        className: 'leaflet-custom-peer-marker',
+        html: peerHtml,
+        iconSize: [30, 30],
+        iconAnchor: [15, 15]
+      });
+
+      const marker = L.marker([peer.location.latitude, peer.location.longitude], { icon: peerIcon })
+        .addTo(map)
+        .bindPopup(`
+          <div style="color: #000; font-family: sans-serif; font-size: 13px; line-height: 1.4;">
+            <b>${peer.name}</b><br/>
+            Role: ${roleName}<br/>
+            Distance: ${peer.distance.toFixed(1)}m<br/>
+            Signal (RSSI): ${peer.rssi} dBm<br/>
+            <button onclick="window.leafletChatNavigate('${peer.id}', '${peer.name}')" style="margin-top: 8px; width: 100%; padding: 6px; background-color: #FF8C42; border: none; color: #FFF; border-radius: 4px; cursor: pointer; font-weight: bold;">Chat</button>
+          </div>
+        `);
+      leafletMarkersRef.current.push(marker);
+
+      // Signal accuracy circle
+      const circle = L.circle([peer.location.latitude, peer.location.longitude], {
+        color: color,
+        fillColor: color,
+        fillOpacity: 0.08,
+        weight: 1,
+        radius: peer.distance,
+      }).addTo(map);
+      leafletMarkersRef.current.push(circle);
+    });
+
+    // 3. SOS Incident Markers
+    sosPins.forEach((sos) => {
+      const coords = [sos.lat, sos.lng];
+      const sosHtml = `
+        <div style="position: relative; width: 30px; height: 30px; display: flex; justify-content: center; align-items: center;">
+          <div style="position: absolute; width: 26px; height: 26px; border-radius: 50%; border: 2px solid #FF3B30; background-color: rgba(255, 59, 48, 0.2); animation: leaflet-pulse 1.5s infinite;"></div>
+          <div style="width: 10px; height: 10px; background-color: #FF3B30; border: 2px solid #FFF; transform: rotate(45deg); box-shadow: 0 0 6px #FF3B30; z-index: 10;"></div>
+        </div>
+      `;
+      const sosIcon = L.divIcon({
+        className: 'leaflet-custom-sos-marker',
+        html: sosHtml,
+        iconSize: [30, 30],
+        iconAnchor: [15, 15]
+      });
+
+      const description = (sos._raw as any).description || 'Emergency assistance requested';
+      const marker = L.marker(coords, { icon: sosIcon })
+        .addTo(map)
+        .bindPopup(`
+          <div style="color: #000; font-family: sans-serif; font-size: 13px;">
+            <b style="color: #FF3B30;">🚨 SOS ALERT!</b><br/>
+            ${description}
+          </div>
+        `);
+      leafletMarkersRef.current.push(marker);
+    });
+
+    (window as any).leafletChatNavigate = (peerId: string, peerName: string) => {
+      handleMarkerPress({ id: peerId, name: peerName });
+    };
+
+  }, [leafletLoaded, baseLat, baseLng, resolvedPeers, sosPins]);
 
   const handleMarkerPress = (person: any) => {
     navigation.navigate('Chat', { recipientId: person.id, recipientName: person.name });
@@ -147,107 +391,31 @@ export default function MapScreen({ navigation }: any) {
       <StatusBar barStyle="light-content" backgroundColor="#000000" />
 
       <SafeAreaView style={styles.headerWrapper}>
-        <TouchableOpacity style={styles.headerContainer} onPress={() => navigation.reset({index: 0, routes: [{name: 'Home'}]})}>
-          <Text style={styles.sosifyLogo}>* SOSIFY</Text>
-        </TouchableOpacity>
+        <View style={styles.headerContainer}>
+          <TouchableOpacity onPress={() => navigation.reset({ index: 0, routes: [{ name: 'Home' }] })}>
+            <Text style={styles.sosifyLogo}>* SOSIFY</Text>
+          </TouchableOpacity>
+          <Text style={styles.gpsStatusText}>
+            {hasOwnGps ? '🟢 GPS Active' : '🟡 Offline Grid (RSSI Solved)'}
+          </Text>
+        </View>
       </SafeAreaView>
 
-      {/* Web Sonar Radar Display */}
-      <View style={styles.mapPlaceholder}>
-        <Text style={styles.placeholderTitle}>Web Sonar Grid Visualizer</Text>
-        <Text style={styles.placeholderSubtitle}>Relative positions calculated from P2P Signal Strengths</Text>
-        
-        {/* Sonar Area */}
-        <View style={styles.sonarScreen}>
-          {/* Static CSS Injection for Radar Sweep and Pulsing animations */}
-          {Platform.OS === 'web' && (
-            <style dangerouslySetInnerHTML={{ __html: `
-              @keyframes sweep {
-                from { transform: rotate(0deg); }
-                to { transform: rotate(360deg); }
-              }
-              @keyframes radar-pulse {
-                0% { transform: scale(0.9); opacity: 0.8; }
-                100% { transform: scale(2.5); opacity: 0; }
-              }
-              .radar-sweep-hand {
-                transform-origin: bottom center;
-                animation: sweep 4s linear infinite;
-              }
-              .pulse-dot {
-                animation: radar-pulse 2s infinite ease-out;
-              }
-            `}} />
-          )}
-
-          {/* Sonar Background Circles */}
-          <View style={[styles.sonarRing, { width: 70, height: 70, borderRadius: 35 }]} />
-          <View style={[styles.sonarRing, { width: 140, height: 140, borderRadius: 70 }]} />
-          <View style={[styles.sonarRing, { width: 210, height: 210, borderRadius: 105 }]} />
-          <View style={[styles.sonarRing, { width: 280, height: 280, borderRadius: 140 }]} />
-          
-          {/* Sonar Axis Lines */}
-          <View style={styles.sonarAxisH} />
-          <View style={styles.sonarAxisV} />
-
-          {/* Sweep Hand */}
-          <div style={StyleSheet.flatten([styles.sweepHand, { height: SONAR_RADIUS }]) as any} className="radar-sweep-hand" />
-
-          {/* Center (Me) Dot */}
-          <View style={[styles.dotMe, { left: SONAR_RADIUS - 6, top: SONAR_RADIUS - 6 }]} />
-
-          {/* Resolved Peer Dots on the Radar Screen */}
-          {rawPeers.map((peer) => {
-            const d = rssiToDistance(peer.rssi);
-            // Map 0m - 100m to 0px - 140px on the radar circle
-            const normD = Math.min((d / 100) * SONAR_RADIUS, SONAR_RADIUS - 10);
-            const angle = getStableAngleForPeer(peer.deviceId);
-            
-            const x = SONAR_RADIUS + normD * Math.cos(angle);
-            const y = SONAR_RADIUS + normD * Math.sin(angle);
-
-            const isResponder = peer.role === 'responder' || peer.role === 'admin';
-            const color = isResponder ? '#E0005C' : '#FF8C42';
-
-            return (
-              <TouchableOpacity
-                key={peer.deviceId}
-                style={[styles.peerDotContainer, { left: x - 15, top: y - 15 }]}
-                onPress={() => handleMarkerPress({ id: peer.deviceId, name: peer.displayName })}
-              >
-                {/* Sonar Pulse Indicator */}
-                <div style={StyleSheet.flatten([styles.pulseDot, { borderColor: color, backgroundColor: color + '1A' }]) as any} className="pulse-dot" />
-                <View style={[styles.dotPeer, { backgroundColor: color }]} />
-                <Text style={styles.peerLabel} numberOfLines={1}>{peer.displayName}</Text>
-              </TouchableOpacity>
-            );
-          })}
-        </View>
-
-        <TouchableOpacity
-          style={styles.simulateButton}
-          onPress={handleSimulatePeer}
-        >
-          <Text style={styles.simulateButtonText}>➕ Simulate Discovered Peer</Text>
-        </TouchableOpacity>
-
-        {/* Render simple list of detected nodes on the web instead of pins */}
-        <View style={styles.nodeListContainer}>
-          <Text style={styles.nodeListHeader}>Discovered Mesh Nodes (Web Sandbox):</Text>
-          {nearbyUsers.map(u => (
-            <TouchableOpacity key={u.id} style={styles.nodeItem} onPress={() => handleMarkerPress(u)}>
-              <Text style={styles.nodeItemText}>👤 {u.name} (Peer Victim)</Text>
-            </TouchableOpacity>
-          ))}
-          {nearbyRescuers.map(r => (
-            <TouchableOpacity key={r.id} style={styles.nodeItem} onPress={() => handleMarkerPress(r)}>
-              <Text style={styles.nodeItemTextResponder}>🛡️ {r.name} (Rescuer)</Text>
-            </TouchableOpacity>
-          ))}
-          {nearbyUsers.length === 0 && nearbyRescuers.length === 0 && (
-            <Text style={styles.placeholderSubtitle}>No mesh node locations broadcasted yet.</Text>
-          )}
-        </View>
+      {/* Interactive Map View */}
+      <View style={styles.mapContainer}>
+        {Platform.OS === 'web' && (
+          <style dangerouslySetInnerHTML={{ __html: `
+            @keyframes leaflet-pulse {
+              0% { transform: scale(0.8); opacity: 0.9; }
+              100% { transform: scale(2.4); opacity: 0; }
+            }
+            .leaflet-custom-marker, .leaflet-custom-me-marker, .leaflet-custom-peer-marker, .leaflet-custom-sos-marker {
+              background: none !important;
+              border: none !important;
+            }
+          `}} />
+        )}
+        <div ref={mapContainerRef} style={{ width: '100%', height: '100%' }} />
       </View>
 
       {/* Floating Connection Indicator */}
@@ -256,6 +424,14 @@ export default function MapScreen({ navigation }: any) {
           📡 {peerCount > 0 ? `Connected (${peerCount} peers)` : 'Searching...'}
         </Text>
       </View>
+
+      {/* Simulation Trigger button for Web Development sandbox */}
+      <TouchableOpacity
+        style={styles.simulateButton}
+        onPress={handleSimulatePeer}
+      >
+        <Text style={styles.simulateButtonText}>➕ Simulate Discovered Peer</Text>
+      </TouchableOpacity>
 
       <SafeAreaView style={styles.bottomWrapper}>
         <View style={styles.statsContainer}>
@@ -291,6 +467,9 @@ const styles = StyleSheet.create({
     backgroundColor: '#000000',
   },
   headerContainer: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
     paddingHorizontal: 16,
     paddingVertical: 12,
     borderBottomWidth: 1,
@@ -301,167 +480,53 @@ const styles = StyleSheet.create({
     fontWeight: 'bold',
     color: '#FF8C42',
   },
+  gpsStatusText: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: '#888',
+  },
+  mapContainer: {
+    flex: 1,
+    backgroundColor: '#111111',
+  },
   bottomWrapper: {
     backgroundColor: '#000000',
   },
-  mapPlaceholder: {
-    flex: 1,
-    justifyContent: 'flex-start',
-    alignItems: 'center',
-    backgroundColor: '#111111',
-    borderWidth: 1,
-    borderColor: '#222',
-    margin: 16,
-    borderRadius: 12,
-    padding: 16,
-    overflow: 'scroll',
-  },
-  placeholderTitle: {
-    color: '#FFF',
-    fontSize: 18,
-    fontWeight: 'bold',
-    marginTop: 8,
-  },
-  placeholderSubtitle: {
-    color: '#666',
-    fontSize: 13,
-    marginTop: 4,
-    textAlign: 'center',
-  },
-  sonarScreen: {
-    width: SONAR_SIZE,
-    height: SONAR_SIZE,
-    borderRadius: SONAR_RADIUS,
-    backgroundColor: '#050505',
-    borderWidth: 2,
-    borderColor: '#111',
-    marginTop: 20,
-    position: 'relative',
-    justifyContent: 'center',
-    alignItems: 'center',
-    overflow: 'hidden',
-  },
-  sonarRing: {
-    position: 'absolute',
-    borderWidth: 1,
-    borderColor: 'rgba(2, 195, 154, 0.15)',
-    borderStyle: 'dashed',
-  },
-  sonarAxisH: {
-    position: 'absolute',
-    height: 1,
-    width: '100%',
-    backgroundColor: 'rgba(2, 195, 154, 0.1)',
-  },
-  sonarAxisV: {
-    position: 'absolute',
-    width: 1,
-    height: '100%',
-    backgroundColor: 'rgba(2, 195, 154, 0.1)',
-  },
-  sweepHand: {
-    position: 'absolute',
-    width: 2,
-    bottom: SONAR_RADIUS,
-    backgroundColor: 'rgba(2, 195, 154, 0.4)',
-    transformOrigin: 'bottom center',
-    boxShadow: '0 0 10px rgba(2, 195, 154, 0.8)',
-  },
-  dotMe: {
-    position: 'absolute',
-    width: 12,
-    height: 12,
-    borderRadius: 6,
-    backgroundColor: '#02C39A',
-    borderWidth: 2,
-    borderColor: '#FFF',
-    zIndex: 50,
-    boxShadow: '0 0 6px #02C39A',
-  },
-  peerDotContainer: {
-    position: 'absolute',
-    width: 30,
-    height: 30,
-    justifyContent: 'center',
-    alignItems: 'center',
-    zIndex: 10,
-    cursor: 'pointer',
-  },
-  dotPeer: {
-    width: 10,
-    height: 10,
-    borderRadius: 5,
-    borderWidth: 2,
-    borderColor: '#FFF',
-    zIndex: 12,
-  },
-  pulseDot: {
-    position: 'absolute',
-    width: 14,
-    height: 14,
-    borderRadius: 7,
-    borderWidth: 1.5,
-    zIndex: 11,
-  },
-  peerLabel: {
-    position: 'absolute',
-    top: 24,
-    fontSize: 9,
-    color: '#CCC',
-    fontWeight: 'bold',
-    backgroundColor: 'rgba(0,0,0,0.6)',
-    paddingHorizontal: 4,
-    paddingVertical: 1,
-    borderRadius: 4,
-    whiteSpace: 'nowrap',
-  } as any,
-  nodeListContainer: {
-    marginTop: 20,
-    width: '100%',
-    maxWidth: 320,
-    backgroundColor: '#1A1A1A',
-    borderRadius: 8,
-    padding: 12,
-  },
-  nodeListHeader: {
-    color: '#888',
-    fontSize: 12,
-    fontWeight: 'bold',
-    marginBottom: 8,
-    textAlign: 'center',
-  },
-  nodeItem: {
-    backgroundColor: '#262626',
-    padding: 10,
-    borderRadius: 6,
-    marginVertical: 4,
-    cursor: 'pointer',
-  },
-  nodeItemText: {
-    color: '#FF8C42',
-    fontSize: 13,
-    fontWeight: '600',
-  },
-  nodeItemTextResponder: {
-    color: '#E0005C',
-    fontSize: 13,
-    fontWeight: '600',
-  },
   connectionBadge: {
     position: 'absolute',
-    top: 70,
+    top: 75,
     right: 16,
-    backgroundColor: '#1A1A1A',
+    backgroundColor: 'rgba(26, 26, 26, 0.95)',
     paddingHorizontal: 12,
     paddingVertical: 6,
     borderRadius: 16,
     borderWidth: 1,
     borderColor: '#333',
+    zIndex: 1000,
   },
   connectionText: {
     color: '#FF8C42',
     fontSize: 12,
     fontWeight: '600',
+  },
+  simulateButton: {
+    position: 'absolute',
+    top: 125,
+    right: 16,
+    backgroundColor: '#00D4FF',
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+    borderRadius: 16,
+    zIndex: 1000,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.3,
+    shadowRadius: 4,
+  },
+  simulateButtonText: {
+    color: '#000',
+    fontSize: 12,
+    fontWeight: 'bold',
   },
   statsContainer: {
     flexDirection: 'row',
@@ -493,7 +558,7 @@ const styles = StyleSheet.create({
   statRescuersNumber: {
     fontSize: 20,
     fontWeight: '700',
-    color: '#E0005C',
+    color: '#FF4081',
   },
   messageButton: {
     flexDirection: 'row',
@@ -511,18 +576,5 @@ const styles = StyleSheet.create({
     color: '#FFF',
     fontWeight: '600',
     fontSize: 14,
-  },
-  simulateButton: {
-    backgroundColor: '#028090',
-    paddingVertical: 8,
-    paddingHorizontal: 16,
-    borderRadius: 6,
-    marginTop: 16,
-    cursor: 'pointer',
-  },
-  simulateButtonText: {
-    color: '#FFF',
-    fontSize: 13,
-    fontWeight: 'bold',
   },
 });
