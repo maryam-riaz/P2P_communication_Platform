@@ -13,7 +13,7 @@ import { RootState } from '../../redux/store';
 import { setUserLocation, setNearbyUsers, setNearbyRescuers } from '../../redux/slices/mapSlice';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import * as Location from 'expo-location';
-import { BleManager } from 'react-native-ble-plx';
+import { sharedBleManager } from '../../comms/ble/shared-ble-manager';
 import { useService } from '../../hooks/useService';
 import { MapService, PeerPin } from '../../services/MapService';
 import { SosService } from '../../services/SosService';
@@ -230,7 +230,6 @@ export default function MapScreen({ navigation }: any) {
 
     let isMounted = true;
 
-    const bleManager = new BleManager();
     const checkGps = async () => {
       try {
         const enabled = await Location.hasServicesEnabledAsync();
@@ -242,7 +241,7 @@ export default function MapScreen({ navigation }: any) {
 
     const checkBluetooth = async () => {
       try {
-        const state = await bleManager.state();
+        const state = await sharedBleManager.state();
         if (isMounted) setBluetoothEnabled(state === 'PoweredOn');
       } catch (e) {
         // Fallback
@@ -271,7 +270,6 @@ export default function MapScreen({ navigation }: any) {
     return () => {
       isMounted = false;
       clearInterval(interval);
-      bleManager.destroy();
       unsubState();
     };
   }, []);
@@ -427,9 +425,17 @@ export default function MapScreen({ navigation }: any) {
     webViewRef.current.injectJavaScript(jsCode);
   }, [mySolvedCoords, solvedPeers, sosPins]);
 
-  // Push updates to Leaflet on state changes
+  // Push updates to Leaflet on state changes.
+  // Debounced: BLE peer-discovery events can arrive in rapid bursts (multiple
+  // per millisecond during a scan), and each one flows through to here via
+  // rawPeers -> solvedPeers. Without debouncing, a single burst could queue
+  // up many synchronous injectJavaScript calls in a row and stall the JS
+  // thread — this was a contributing factor to an ANR captured on this screen.
   useEffect(() => {
-    handleUpdateWebView();
+    const timer = setTimeout(() => {
+      handleUpdateWebView();
+    }, 300);
+    return () => clearTimeout(timer);
   }, [mySolvedCoords, solvedPeers, sosPins, handleUpdateWebView]);
 
   const handleCenterMap = () => {

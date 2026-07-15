@@ -1,5 +1,6 @@
 import { BleManager, Device } from 'react-native-ble-plx';
 import { BleDevice, DISASTER_P2P_SERVICE_UUID, UserRole } from './ble-types';
+import { sharedBleManager } from './shared-ble-manager';
 
 /**
  * Converts a 16-byte Uint8Array to a UUID string with dashes.
@@ -65,7 +66,7 @@ export class BleScanner {
   private bleManager: BleManager;
 
   constructor(private onPeerDiscovered: (device: BleDevice) => void) {
-    this.bleManager = new BleManager();
+    this.bleManager = sharedBleManager;
   }
 
   startScanning(): void {
@@ -182,11 +183,16 @@ export class BleScanner {
   }
 
   /**
-   * Releases BLE resources. Call when the component using this is unmounted.
+   * Stops scanning. Call when the component using this is unmounted.
+   *
+   * Note: this intentionally does NOT call `bleManager.destroy()` anymore.
+   * The BleManager is now a shared, app-wide singleton (see
+   * shared-ble-manager.ts) used by other consumers too (e.g. MapScreen's
+   * Bluetooth-enabled check), so destroying it here would break BLE for the
+   * rest of the app. Only stop what this scanner itself started.
    */
   destroy(): void {
     this.stopScanning();
-    this.bleManager.destroy();
   }
 
   status(): boolean {

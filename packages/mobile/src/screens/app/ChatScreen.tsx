@@ -504,9 +504,9 @@ export default function ChatScreen({ route, navigation }: any) {
             {isUser && (
               <MaterialCommunityIcons
                 name={
-                  item.status === 'read'
+                  item.status === 'read' || item.status === 'delivered'
                     ? 'check-all'
-                    : item.status === 'sent' || item.status === 'delivered'
+                    : item.status === 'sent'
                     ? 'check'
                     : 'clock-outline'
                 }

@@ -194,6 +194,9 @@ export function useInitializeServices() {
               }
             } else if (payload.type === 'pong') {
               // Activity already updated above
+            } else if (payload.type === 'ack') {
+              console.log(`[P2P Connection] Received delivery ack for message ${payload.messageId}`);
+              await chatService.markMessageDelivered(payload.messageId);
             }
           } catch (err) {
             console.error('Error handling incoming secure packet payload:', err);

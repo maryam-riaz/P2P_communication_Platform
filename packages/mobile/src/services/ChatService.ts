@@ -332,6 +332,10 @@ export class ChatService {
     const existing = await this.repository.getMessageByHash(contentHash);
     if (existing) {
       console.log(`Duplicate message ${id} received. Dropped.`);
+      // The sender may have re-sent this because our original ack never
+      // arrived (connection dropped mid-flight, etc). Re-send the ack so
+      // their copy isn't stuck showing as undelivered forever.
+      await this.sendDeliveryAck(id, senderId);
       return;
     }
 
@@ -350,16 +354,77 @@ export class ChatService {
       createdAt: Date.now()
     });
     console.log(`[ChatService] Successfully written incoming message to DB. ID: ${saved.id}, Sender: ${senderId}`);
+
+    // Let the original sender know their message actually arrived, so their
+    // copy of it can move from 'sent' to 'delivered'.
+    await this.sendDeliveryAck(id, senderId);
   }
 
   /**
-   * Retries transmission of any pending outbound messages to the peer.
+   * Sends a small 'ack' packet back to the peer that sent us a message,
+   * confirming it was received and written to our database. Mirrors the
+   * existing ping/pong heartbeat pattern already used on this transport.
+   */
+  private async sendDeliveryAck(messageId: string, originalSenderId: string): Promise<void> {
+    const transport = this.getActiveTransport(originalSenderId);
+    if (!transport || !transport.isHandshakeComplete()) {
+      // No live connection back to them right now — nothing to do. If they
+      // reconnect and retry the message (see retryPendingMessages), our
+      // duplicate-check path above will re-send the ack at that point.
+      return;
+    }
+    try {
+      const ackPayload = { type: 'ack', messageId, senderId: originalSenderId };
+      await transport.send(JSON.stringify(ackPayload));
+    } catch (err) {
+      console.warn(`[ChatService] Failed to send delivery ack for message ${messageId}:`, err);
+    }
+  }
+
+  /**
+   * Called when an 'ack' packet is received for a message we sent. Advances
+   * that message's own local status from 'sent' to 'delivered' so the UI
+   * tick can update, WhatsApp-style.
+   */
+  async markMessageDelivered(messageId: string): Promise<void> {
+    const msg = await this.db.get<Message>('messages').find(messageId).catch(() => null);
+    if (!msg) {
+      console.warn(`[ChatService] Received ack for unknown message ${messageId}`);
+      return;
+    }
+    const rawMsg = msg._raw as any;
+    // Don't downgrade a message that's already progressed further (e.g. 'read').
+    if (rawMsg.sync_status === 'read' || rawMsg.sync_status === 'delivered') return;
+
+    await this.db.write(async () => {
+      await msg.update(record => {
+        record.localSyncStatus = 'delivered';
+      });
+    });
+    console.log(`[ChatService] Message ${messageId} marked as delivered.`);
+  }
+
+  /**
+   * Retries transmission of pending or un-acked outbound messages to the peer.
+   *
+   * Covers two cases:
+   *  - 'pending': the transmit itself never succeeded (peer was offline).
+   *  - 'sent': the transmit succeeded, but the delivery ack never came back
+   *    (e.g. the connection dropped right after send() but before the ack
+   *    arrived), so this device has no way to know the peer actually got it.
+   *
+   * Re-sending a 'sent' message here is safe: the receiver's duplicate check
+   * in handleIncomingMessage() will recognize the repeat by content hash and
+   * just re-send the ack rather than writing a second copy of the message.
    */
   private async retryPendingMessages(peerId: string): Promise<void> {
     const pending = await this.db.get<Message>('messages')
       .query(
         Q.where('recipient_id', peerId),
-        Q.where('sync_status', 'pending')
+        Q.or(
+          Q.where('sync_status', 'pending'),
+          Q.where('sync_status', 'sent')
+        )
       ).fetch();
 
     if (pending.length === 0) return;
@@ -367,7 +432,7 @@ export class ChatService {
     const secureTransport = this.getActiveTransport(peerId);
     if (!secureTransport || !secureTransport.isHandshakeComplete()) return;
 
-    console.log(`[ChatService] Retrying ${pending.length} pending messages for peer ${peerId}`);
+    console.log(`[ChatService] Retrying ${pending.length} pending/un-acked messages for peer ${peerId}`);
     
     for (const msg of pending) {
       const rawMsg = msg._raw as any;
