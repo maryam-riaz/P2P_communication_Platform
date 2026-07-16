@@ -27,6 +27,15 @@
     "splash": {
       "image": "./assets/images/splash-icon.png",
       "backgroundColor": "#000000"
-    }
+    },
+    "plugins": [
+      [
+        "expo-image-picker",
+        {
+          "cameraPermission": "The app accesses your camera to let you take photos and share them with your contacts.",
+          "microphonePermission": "The app accesses your microphone to let you record videos."
+        }
+      ]
+    ]
   }
 }

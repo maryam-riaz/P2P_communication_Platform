@@ -20,6 +20,7 @@ import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context'
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { useFocusEffect } from '@react-navigation/native';
 import * as DocumentPicker from 'expo-document-picker';
+import * as ImagePicker from 'expo-image-picker';
 import { Audio } from 'expo-av';
 import { Image } from 'expo-image';
 import { useService } from '../../hooks/useService';
@@ -297,6 +298,107 @@ export default function ChatScreen({ route, navigation }: any) {
 
     } catch (err) {
       console.error('[ChatScreen] Attachment processing failed:', err);
+    } finally {
+      setIsPicking(false);
+      setIsSending(false);
+    }
+  };
+
+  const handleLaunchCamera = () => {
+    if (isPicking || isSending) return;
+
+    Alert.alert(
+      'Select Option',
+      'Would you like to take a photo or record a video?',
+      [
+        {
+          text: 'Take Photo',
+          onPress: () => launchCameraWithOptions('image'),
+        },
+        {
+          text: 'Record Video',
+          onPress: () => launchCameraWithOptions('video'),
+        },
+        {
+          text: 'Cancel',
+          style: 'cancel',
+        },
+      ]
+    );
+  };
+
+  const launchCameraWithOptions = async (mode: 'image' | 'video') => {
+    const isWifiOk = await checkWifiBeforeSend();
+    if (!isWifiOk) return;
+
+    try {
+      const cameraPermission = await ImagePicker.requestCameraPermissionsAsync();
+      if (cameraPermission.status !== 'granted') {
+        Alert.alert(
+          'Permission Denied',
+          'Camera permission is required to capture media.',
+          [
+            { text: 'Cancel', style: 'cancel' },
+            { text: 'Settings', onPress: () => Linking.openSettings() }
+          ]
+        );
+        return;
+      }
+
+      if (mode === 'video') {
+        const microPermission = await Audio.requestPermissionsAsync();
+        if (microPermission.status !== 'granted') {
+          Alert.alert(
+            'Permission Denied',
+            'Microphone permission is required to record videos.',
+            [
+              { text: 'Cancel', style: 'cancel' },
+              { text: 'Settings', onPress: () => Linking.openSettings() }
+            ]
+          );
+          return;
+        }
+      }
+
+      setIsPicking(true);
+
+      const result = await ImagePicker.launchCameraAsync({
+        mediaTypes: mode === 'video' ? ['videos'] : ['images'],
+        quality: 0.4, // Compress image to prevent Out-of-Memory (OOM) crashes
+        videoMaxDuration: 15, // Limit video recording to 15 seconds to prevent OOM
+      });
+
+      if (result.canceled || !result.assets || result.assets.length === 0) {
+        setIsPicking(false);
+        return;
+      }
+
+      const asset = result.assets[0];
+      const type = asset.type === 'video' ? 'video' : 'image';
+
+      setIsSending(true);
+
+      // Read file content as base64 URL
+      const response = await fetch(asset.uri);
+      const blob = await response.blob();
+      const base64DataUrl = await new Promise<string>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onloadend = () => resolve(reader.result as string);
+        reader.onerror = reject;
+        reader.readAsDataURL(blob);
+      });
+
+      const extension = type === 'video' ? 'mp4' : 'jpg';
+      const name = asset.fileName || `camera-${Date.now()}.${extension}`;
+
+      await chatService.sendMessage('', recipientId, {
+        uri: base64DataUrl,
+        type,
+        name,
+      });
+
+    } catch (err) {
+      console.error('[ChatScreen] Camera capture processing failed:', err);
     } finally {
       setIsPicking(false);
       setIsSending(false);
@@ -652,6 +754,13 @@ export default function ChatScreen({ route, navigation }: any) {
                     disabled={isPicking || isSending}
                   >
                     <MaterialCommunityIcons name="paperclip" size={22} color="#FF8C42" />
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    style={styles.attachButton}
+                    onPress={handleLaunchCamera}
+                    disabled={isPicking || isSending}
+                  >
+                    <MaterialCommunityIcons name="camera" size={22} color="#FF8C42" />
                   </TouchableOpacity>
                   <TextInput
                     style={styles.input}
