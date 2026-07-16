@@ -537,7 +537,7 @@ export function useInitializeServices() {
           // instead of via a single global "is anyone connected" flag, so
           // discovering a 3rd/4th device no longer gets silently dropped
           // just because we already have one active connection.
-          const candidate = peers.find((p) =>
+          const candidates = peers.filter((p) =>
             p.status === 3 &&
             !isAlreadyConnectedOrConnecting(p.deviceAddress, p.deviceName) &&
             (p.deviceName.toLowerCase().includes("a32") ||
@@ -545,19 +545,59 @@ export function useInitializeServices() {
              p.deviceName.toLowerCase().includes("vivo") ||
              p.deviceName.toLowerCase().includes("samsung"))
           );
-          if (!candidate) {
+
+          if (candidates.length === 0) {
             console.log('[P2P DEBUG] No new AVAILABLE peers to connect to.');
             return;
           }
- 
-          connectingKeys.add(candidate.deviceAddress);
-          console.log('[P2P DEBUG] Selected target peer for Wi-Fi Direct connection:', candidate.deviceName, candidate.deviceAddress);
+
+          // To prevent simultaneous connectToPeer conflicts, we look up candidates
+          // in our KnownPeers database and check if we are the initiator (our deviceId < their deviceId).
+          let candidateToConnect: typeof candidates[0] | null = null;
           try {
-            await AndroidWifiP2PTransport.connectToPeer(candidate.deviceAddress);
+            const knownPeers = await db.get<KnownPeer>('known_peers').query().fetch();
+            for (const c of candidates) {
+              const matched = knownPeers.find((kp) => {
+                const kpName = (kp._raw as any).display_name;
+                return kpName && c.deviceName.toLowerCase().includes(kpName.toLowerCase());
+              });
+
+              if (matched) {
+                const remoteId = (matched._raw as any).device_id;
+                const isInitiator = deviceId < remoteId;
+                console.log(`[P2P DEBUG] Candidate peer ${c.deviceName} mapped to device ID ${remoteId.substring(0, 8)}. isInitiator = ${isInitiator}`);
+                if (isInitiator) {
+                  candidateToConnect = c;
+                  break;
+                }
+              } else {
+                // Deterministic fallback if not yet in known_peers
+                const isInitiatorFallback = deviceId.toLowerCase() < c.deviceAddress.toLowerCase();
+                console.log(`[P2P DEBUG] Candidate peer ${c.deviceName} NOT found in DB. Fallback comparison: isInitiator = ${isInitiatorFallback}`);
+                if (isInitiatorFallback) {
+                  candidateToConnect = c;
+                  break;
+                }
+              }
+            }
+          } catch (dbErr) {
+            console.warn('[P2P DEBUG] Failed querying known peers, falling back to first candidate:', dbErr);
+            candidateToConnect = candidates[0];
+          }
+
+          if (!candidateToConnect) {
+            console.log('[P2P DEBUG] We are not the initiator for any available candidate peer. Waiting for them to connect...');
+            return;
+          }
+
+          connectingKeys.add(candidateToConnect.deviceAddress);
+          console.log('[P2P DEBUG] Selected target peer for Wi-Fi Direct connection:', candidateToConnect.deviceName, candidateToConnect.deviceAddress);
+          try {
+            await AndroidWifiP2PTransport.connectToPeer(candidateToConnect.deviceAddress);
             console.log('[P2P DEBUG] Native connectToPeer call resolved successfully. Waiting for Group Formation connection info event...');
           } catch (err: any) {
             console.error('[P2P DEBUG] connectToPeer failed:', err);
-            connectingKeys.delete(candidate.deviceAddress);
+            connectingKeys.delete(candidateToConnect.deviceAddress);
             
             // Only perform cleanup if we are still unassigned and no active/connecting key exists
             if (groupRole === 'unassigned' && connectionsByKey.size === 0 && connectingKeys.size === 0) {
