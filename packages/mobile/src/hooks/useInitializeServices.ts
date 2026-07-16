@@ -119,13 +119,38 @@ export function useInitializeServices() {
         isPeerConnecting = false;
         let isInitiatorForAny = false;
 
+        const performP2PCleanup = async (context: string) => {
+          console.log(`[P2P Cleanup - ${context}] Starting robust P2P cleanup sequence...`);
+          try {
+            await AndroidWifiP2PTransport.cancelConnect();
+          } catch (e) {
+            console.warn(`[P2P Cleanup] cancelConnect failed:`, e);
+          }
+          await new Promise((resolve) => setTimeout(resolve, 500));
+          
+          try {
+            await AndroidWifiP2PTransport.clearPersistentGroups();
+          } catch (e) {
+            console.warn(`[P2P Cleanup] clearPersistentGroups failed:`, e);
+          }
+          await new Promise((resolve) => setTimeout(resolve, 500));
+          
+          for (let attempt = 1; attempt <= 3; attempt++) {
+            try {
+              await AndroidWifiP2PTransport.removeGroup();
+              console.log(`[P2P Cleanup] removeGroup succeeded on attempt ${attempt}.`);
+              break;
+            } catch (err: any) {
+              console.warn(`[P2P Cleanup] removeGroup attempt ${attempt} failed:`, err);
+              if (attempt < 3) {
+                await new Promise((resolve) => setTimeout(resolve, 600));
+              }
+            }
+          }
+        };
+
         // TDOWN: Always remove/disconnect any pre-existing native Wi-Fi Direct groups first!
-        try {
-          console.log('[P2P Bootstrap] Tearing down stale Wi-Fi Direct groups...');
-          await AndroidWifiP2PTransport.removeGroup();
-        } catch (err) {
-          console.warn('[P2P Bootstrap] removeGroup failed (normal if no active group):', err);
-        }
+        await performP2PCleanup('Bootstrap');
 
         // Request Bluetooth permissions before starting advertising/scanning
         const permissionsGranted = await requestBlePermissions();
@@ -294,11 +319,7 @@ export function useInitializeServices() {
               if (!ownerAddress || ownerAddress === '') {
                 console.error('[P2P DEBUG] Cannot connect: Group Owner Address remains empty after retries. Resetting P2P group...');
                 isPeerConnecting = false;
-                try {
-                  await AndroidWifiP2PTransport.removeGroup();
-                } catch (cleanErr) {
-                  console.warn('[P2P DEBUG] removeGroup failed:', cleanErr);
-                }
+                await performP2PCleanup('Client Empty GO IP');
                 return;
               }
 
@@ -322,11 +343,7 @@ export function useInitializeServices() {
                   if (attempt === 5) {
                     console.error('[P2P DEBUG] Max connection retries reached. Group Owner unreachable. Resetting P2P group...');
                     isPeerConnecting = false;
-                    try {
-                      await AndroidWifiP2PTransport.removeGroup();
-                    } catch (cleanErr) {
-                      console.warn('[P2P DEBUG] removeGroup failed:', cleanErr);
-                    }
+                    await performP2PCleanup('Client Retry Max Failure');
                   }
                 }
               }
@@ -370,12 +387,7 @@ export function useInitializeServices() {
           } catch (err: any) {
             console.error('[P2P DEBUG] connectToPeer failed:', err);
             await new Promise((resolve) => setTimeout(resolve, 3000));
-            try {
-              await AndroidWifiP2PTransport.removeGroup();
-              console.log('[P2P DEBUG] Cleaned up stale group after connection failure.');
-            } catch (cleanErr) {
-              console.warn('[P2P DEBUG] removeGroup clean failed:', cleanErr);
-            }
+            await performP2PCleanup('Initiator Connect Failure');
             isPeerConnecting = false;
           }
         });

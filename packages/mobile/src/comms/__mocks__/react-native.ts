@@ -62,6 +62,8 @@ const WifiDirectMock = {
     groupFormed: true,
   }),
   disconnect: jest.fn().mockResolvedValue(undefined),
+  deletePersistentGroups: jest.fn().mockResolvedValue(true),
+  cancelConnect: jest.fn().mockResolvedValue(true),
   isWifiEnabled: jest.fn().mockResolvedValue(true),
   setWifiEnabled: jest.fn().mockResolvedValue(true),
   setBluetoothEnabled: jest.fn().mockResolvedValue(true),

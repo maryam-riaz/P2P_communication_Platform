@@ -168,6 +168,22 @@ export class AndroidWifiP2PTransport implements PeerTransport {
     await WifiDirect.disconnect();
   }
 
+  /**
+   * Deletes all persistent Wi-Fi Direct groups from the device's P2P cache.
+   */
+  static async clearPersistentGroups(): Promise<void> {
+    if (!WifiDirect) return;
+    await WifiDirect.deletePersistentGroups();
+  }
+
+  /**
+   * Cancels any active Wi-Fi Direct connection or negotiation attempt.
+   */
+  static async cancelConnect(): Promise<void> {
+    if (!WifiDirect) return;
+    await WifiDirect.cancelConnect();
+  }
+
   // ─── Native TCP Socket Layer ───────────────────────────────────────────────
 
   /**

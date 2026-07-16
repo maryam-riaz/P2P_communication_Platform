@@ -24,6 +24,7 @@ export class ChatService {
   private transportLastSeenMap = new Map<string, number>();
   private heartbeatIntervalId: any = null;
   private secureTransportsList: SecureTransport[] = [];
+  private transportHandshakeStartMap = new Map<SecureTransport, number>();
 
   constructor(private db: Database) {
     this.repository = new MobileRepository(db);
@@ -39,6 +40,7 @@ export class ChatService {
 
   unregisterSecureTransport(transport: SecureTransport) {
     this.secureTransportsList = this.secureTransportsList.filter(t => t !== transport);
+    this.transportHandshakeStartMap.delete(transport);
     console.log('[ChatService] SecureTransport unregistered. Current pool size:', this.secureTransportsList.length);
   }
 
@@ -51,12 +53,30 @@ export class ChatService {
       // ── Self-Healing: Trigger handshake retry for connected raw channels without handshake ──
       for (const transport of this.secureTransportsList) {
         if (transport.isConnected() && !transport.isHandshakeComplete()) {
+          if (!this.transportHandshakeStartMap.has(transport)) {
+            this.transportHandshakeStartMap.set(transport, now);
+          } else {
+            const startTime = this.transportHandshakeStartMap.get(transport)!;
+            // If the raw transport is connected but handshake fails to complete for > 30 seconds, disconnect and prune it
+            if (now - startTime > 30000) {
+              console.log('[ChatService] Secure transport handshake timeout (>30s). Disconnecting stale raw transport.');
+              this.transportHandshakeStartMap.delete(transport);
+              try {
+                await transport.disconnect();
+              } catch (err) {
+                console.warn('[ChatService] Error disconnecting timed-out transport:', err);
+              }
+              continue;
+            }
+          }
           console.log('[ChatService] Self-Healing: Connected raw transport found without active handshake. Triggering handshake retry...');
           try {
             await transport.establishHandshake();
           } catch (err) {
             console.warn('[ChatService] Self-healing handshake retry failed:', err);
           }
+        } else {
+          this.transportHandshakeStartMap.delete(transport);
         }
       }
 
