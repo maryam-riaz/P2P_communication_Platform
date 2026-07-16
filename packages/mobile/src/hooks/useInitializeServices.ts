@@ -264,6 +264,9 @@ export function useInitializeServices() {
             entry.deviceId = remoteId;
             chatService.registerActiveTransport(remoteId, secure);
             connectingKeys.delete(connKey);
+            if (groupRole === 'client') {
+              connectingKeys.clear();
+            }
  
             const peersRepo = new MobileRepository(db);
             await peersRepo.addNewPeer({
@@ -309,6 +312,10 @@ export function useInitializeServices() {
           chatService.unregisterSecureTransport(secure);
           connectionsByKey.delete(connKey);
           connectingKeys.delete(connKey);
+ 
+          if (connectionsByKey.size === 0) {
+            connectingKeys.clear();
+          }
  
           // Only the client role is exclusive to one group; losing our one
           // client connection frees us up to look for (or accept) another.
@@ -509,6 +516,22 @@ export function useInitializeServices() {
             return;
           }
  
+          const isAlreadyConnectedOrConnecting = (pAddress: string, pName: string): boolean => {
+            if (connectingKeys.has(pAddress) || connectionsByKey.has(pAddress)) {
+              return true;
+            }
+            const connections = Array.from(connectionsByKey.values());
+            const hasMatchingConnection = connections.some((conn) => {
+              if (conn.connKey === pAddress) return true;
+              const remoteName = conn.secure.getRemoteDisplayName();
+              if (remoteName && pName.toLowerCase().includes(remoteName.toLowerCase())) {
+                return true;
+              }
+              return false;
+            });
+            return hasMatchingConnection;
+          };
+ 
           // Find peers that are AVAILABLE (status 3) and not already
           // connected or mid-connection — this is now checked PER PEER
           // instead of via a single global "is anyone connected" flag, so
@@ -516,8 +539,7 @@ export function useInitializeServices() {
           // just because we already have one active connection.
           const candidate = peers.find((p) =>
             p.status === 3 &&
-            !connectionsByKey.has(p.deviceAddress) &&
-            !connectingKeys.has(p.deviceAddress) &&
+            !isAlreadyConnectedOrConnecting(p.deviceAddress, p.deviceName) &&
             (p.deviceName.toLowerCase().includes("a32") ||
              p.deviceName.toLowerCase().includes("a33") ||
              p.deviceName.toLowerCase().includes("vivo") ||
@@ -536,8 +558,15 @@ export function useInitializeServices() {
           } catch (err: any) {
             console.error('[P2P DEBUG] connectToPeer failed:', err);
             connectingKeys.delete(candidate.deviceAddress);
-            await new Promise((resolve) => setTimeout(resolve, 3000));
-            await performP2PCleanup('Initiator Connect Failure');
+            
+            // Only perform cleanup if we are still unassigned and no active/connecting key exists
+            if (groupRole === 'unassigned' && connectionsByKey.size === 0 && connectingKeys.size === 0) {
+              await new Promise((resolve) => setTimeout(resolve, 3000));
+              // Double check after delay to prevent race conditions
+              if (groupRole === 'unassigned' && connectionsByKey.size === 0 && connectingKeys.size === 0) {
+                await performP2PCleanup('Initiator Connect Failure');
+              }
+            }
           }
         });
  
