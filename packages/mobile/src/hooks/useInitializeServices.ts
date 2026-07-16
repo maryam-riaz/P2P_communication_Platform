@@ -3,25 +3,25 @@ import { Database, Q } from '@nozbe/watermelondb';
 import { useDispatch } from 'react-redux';
 import { logout } from '../redux/slices/authSlice';
 import LokiJSAdapter from '@nozbe/watermelondb/adapters/lokijs';
-
+ 
 import { Platform, AppState, AppStateStatus } from 'react-native';
 import { secureStore as SecureStore } from '../utils/secureStore';
-
+ 
 import { localDbSchema, localDbMigrations } from '../db/schema';
 import { LocalUser, KnownPeer, Message, SosEvent, LocationLog, SyncQueue } from '../db/models';
 import { MobileRepository } from '../db/repository';
-
+ 
 import { BleScanner } from '../comms/ble/ble-scanner';
 import { BleAdvertiser } from '../comms/ble/ble-advertiser';
 import { requestBlePermissions } from '../comms/ble/ble-permission-helper';
 import { AndroidWifiP2PTransport } from '../comms/wifi-direct/wifi-p2p-transport.android';
 import { SecureTransport } from '../comms/secure-transport';
-
+ 
 import { AuthService } from '../services/AuthService';
 import { ChatService } from '../services/ChatService';
 import { MapService } from '../services/MapService';
 import { SosService } from '../services/SosService';
-
+ 
 export interface Services {
   authService: AuthService;
   chatService: ChatService;
@@ -30,25 +30,36 @@ export interface Services {
   database: Database;
   bleScanner?: BleScanner;
   bleAdvertiser?: BleAdvertiser;
-  rawTransport?: AndroidWifiP2PTransport;
-  secureTransport?: SecureTransport;
   initTransportsForUser: (user: LocalUser) => Promise<void>;
   shutdownTransports: () => Promise<void>;
 }
-
+ 
+/**
+ * One physical Wi-Fi Direct socket + its secure channel wrapper.
+ * Before the handshake completes we only know the peer by its Wi-Fi Direct
+ * MAC address (`connKey`); once PUBKEY_EXCHANGE arrives we also know its
+ * logical deviceId and mirror the entry into ChatService's peer map.
+ */
+interface PeerConnection {
+  connKey: string; // Wi-Fi Direct MAC address, or a synthetic key for the GO's inbound socket
+  raw: AndroidWifiP2PTransport;
+  secure: SecureTransport;
+  deviceId?: string;
+}
+ 
 export function useInitializeServices() {
   const [services, setServices] = useState<Services | null>(null);
   const dispatch = useDispatch();
-
+ 
   useEffect(() => {
     let db: Database;
-
+ 
     const initAsync = async () => {
       // SQLiteAdapter requires the WMDatabaseBridge native module compiled into the app binary.
       // In Expo Go this native module is absent, so we fall back to the pure-JS LokiJS adapter.
       const { NativeModules } = require('react-native');
       const hasNativeSQLite = !!NativeModules.WMDatabaseBridge;
-
+ 
       let adapter;
       if (!hasNativeSQLite || Platform.OS === 'web' || process.env.NODE_ENV === 'test') {
         adapter = new LokiJSAdapter({
@@ -65,136 +76,153 @@ export function useInitializeServices() {
           onSetUpError: (error: any) => console.error('WatermelonDB SQLite setup failed:', error),
         });
       }
-
+ 
       db = new Database({
         adapter,
         modelClasses: [LocalUser, KnownPeer, Message, SosEvent, LocationLog, SyncQueue],
       });
-
+ 
       // 2. Initialize Services
       const authService = new AuthService(db);
       const chatService = new ChatService(db);
       const mapService = new MapService(db);
       const sosService = new SosService(db, chatService);
-
+ 
       // Link ChatService to MapService for location sharing
       mapService.setChatService(chatService);
-
+ 
       // Initialize Wifi Direct static layer at startup
       AndroidWifiP2PTransport.initialize().catch((err) => {
         console.warn('[P2P Bootstrap] Failed to initialize static Wi-Fi Direct:', err);
       });
-
+ 
       // Context state holders for dynamic P2P setup
       let currentAdvertiser: BleAdvertiser | undefined;
       let currentScanner: BleScanner | undefined;
-      let currentRawTransport: AndroidWifiP2PTransport | undefined;
-      let currentSecureTransport: SecureTransport | undefined;
       let unsubConnectionInfo: (() => void) | null = null;
       let unsubPeersChanged: (() => void) | null = null;
-      // Guard flags to prevent duplicate socket open and duplicate peer connect calls
+ 
+      // ── Multi-peer connection pools ──────────────────────────────────────
+      // Every connected/connecting peer gets its own PeerConnection, keyed by
+      // Wi-Fi Direct MAC address first, then mirrored by deviceId once the
+      // handshake reveals it. This replaces the old single
+      // `currentRawTransport` / `currentSecureTransport` variables, which
+      // meant the app could only ever track ONE peer connection: as soon as
+      // device B connected, the guards below treated "a connection exists"
+      // as "ignore everyone else," so device C's handshake never started.
+      const connectionsByKey = new Map<string, PeerConnection>();
+      const connectingKeys = new Set<string>();
+ 
+      // A device can only be a *client* of one Wi-Fi Direct group at a time
+      // (an OS-level constraint, not a bug) — but if it's the *group owner*,
+      // more devices can still join that same group. Track which role we're
+      // in so we know whether it's even valid to attempt another connection.
+      let groupRole: 'unassigned' | 'owner' | 'client' = 'unassigned';
       let serverSocketBound = false;
-      let isPeerConnecting = false;
-
+ 
       /**
-       * Dynamic initialization of BLE and Wi-Fi Direct transports once identity is loaded.
+       * Wires up a raw transport + its SecureTransport wrapper with all the
+       * message/handshake/disconnect handling that used to live inline
+       * against the single `currentSecureTransport`. Used for both the
+       * group-owner's inbound socket and a client's outbound socket.
        */
-      const initTransportsForUser = async (user: LocalUser) => {
-        const deviceId = (user._raw as any).device_id as string;
-        const role = (user._raw as any).role as any;
-        const publicKey = (user._raw as any).public_key as string;
-        const privateKey = await SecureStore.getItemAsync(`private_key_${deviceId}`);
-
-        if (!privateKey) {
-          console.warn('Private key not found in SecureStore. Session corrupted, logging out.');
-          await authService.logout();
-          dispatch(logout());
-          return;
+      const performP2PCleanup = async (context: string) => {
+        console.log(`[P2P Cleanup - ${context}] Starting robust P2P cleanup sequence...`);
+        try {
+          await AndroidWifiP2PTransport.cancelConnect();
+        } catch (e) {
+          console.warn(`[P2P Cleanup] cancelConnect failed:`, e);
         }
-
-        console.log(`[P2P Bootstrap] Initializing transports for user: ${deviceId}`);
-
-        // Reset per-session state flags
-        serverSocketBound = false;
-        isPeerConnecting = false;
-        let isInitiatorForAny = false;
-
-        const performP2PCleanup = async (context: string) => {
-          console.log(`[P2P Cleanup - ${context}] Starting robust P2P cleanup sequence...`);
+        await new Promise((resolve) => setTimeout(resolve, 500));
+        
+        try {
+          await AndroidWifiP2PTransport.clearPersistentGroups();
+        } catch (e) {
+          console.warn(`[P2P Cleanup] clearPersistentGroups failed:`, e);
+        }
+        await new Promise((resolve) => setTimeout(resolve, 500));
+        
+        for (let attempt = 1; attempt <= 3; attempt++) {
           try {
-            await AndroidWifiP2PTransport.cancelConnect();
-          } catch (e) {
-            console.warn(`[P2P Cleanup] cancelConnect failed:`, e);
-          }
-          await new Promise((resolve) => setTimeout(resolve, 500));
-          
-          try {
-            await AndroidWifiP2PTransport.clearPersistentGroups();
-          } catch (e) {
-            console.warn(`[P2P Cleanup] clearPersistentGroups failed:`, e);
-          }
-          await new Promise((resolve) => setTimeout(resolve, 500));
-          
-          for (let attempt = 1; attempt <= 3; attempt++) {
-            try {
-              await AndroidWifiP2PTransport.removeGroup();
-              console.log(`[P2P Cleanup] removeGroup succeeded on attempt ${attempt}.`);
-              break;
-            } catch (err: any) {
-              console.warn(`[P2P Cleanup] removeGroup attempt ${attempt} failed:`, err);
-              if (attempt < 3) {
-                await new Promise((resolve) => setTimeout(resolve, 600));
-              }
+            await AndroidWifiP2PTransport.removeGroup();
+            console.log(`[P2P Cleanup] removeGroup succeeded on attempt ${attempt}.`);
+            break;
+          } catch (err: any) {
+            console.warn(`[P2P Cleanup] removeGroup attempt ${attempt} failed:`, err);
+            if (attempt < 3) {
+              await new Promise((resolve) => setTimeout(resolve, 600));
             }
           }
-        };
-
-        // TDOWN: Always remove/disconnect any pre-existing native Wi-Fi Direct groups first!
-        await performP2PCleanup('Bootstrap');
-
-        // Request Bluetooth permissions before starting advertising/scanning
-        const permissionsGranted = await requestBlePermissions();
-        if (!permissionsGranted) {
-          console.warn('[P2P Bootstrap] Bluetooth permissions not granted. Cannot start advertising or scanning.');
-          return;
         }
+      };
 
-        // Stop any old transports
-        if (currentAdvertiser) await currentAdvertiser.stopAdvertising();
-        if (currentScanner) currentScanner.stopScanning();
-        if (currentRawTransport) await currentRawTransport.disconnect();
-
-        const displayName = (user._raw as any).display_name || 'Peer';
-
-        // Instantiate Phase 2 BLE scanning & advertising
-        const pubKeyHash = publicKey.slice(0, 8); // 4-byte hash (8 hex chars)
-        currentAdvertiser = new BleAdvertiser(deviceId, role, pubKeyHash, displayName);
-        try {
-          await currentAdvertiser.startAdvertising();
-        } catch (err) {
-          console.warn('[P2P Bootstrap] Failed to start BLE advertising (check if Bluetooth is enabled):', err);
-        }
-
-        // Instantiate Phase 2 Android Wifi Direct
-        currentRawTransport = new AndroidWifiP2PTransport(deviceId);
-
-        // Instantiate Phase 3 Cryptographic secure channel
-        currentSecureTransport = new SecureTransport(currentRawTransport, privateKey, publicKey, deviceId, displayName);
-        chatService.registerSecureTransport(currentSecureTransport);
-
-        // ── CRITICAL: Register SecureTransport callbacks BEFORE any TCP socket opens ──
-        // This prevents the BUG 4 race where PUBKEY_EXCHANGE arrives before listeners are ready.
-
-        // Wire up SecureTransport receive callback (registered before TCP opens)
-        currentSecureTransport.receive(async (plaintext) => {
-          console.log('[P2P Connection] Encrypted payload successfully decrypted:', plaintext);
+      const setupPeerConnection = (
+        connKey: string,
+        raw: AndroidWifiP2PTransport,
+        secure: SecureTransport,
+        localDeviceId: string
+      ): PeerConnection => {
+        const entry: PeerConnection = { connKey, raw, secure };
+        connectionsByKey.set(connKey, entry);
+        chatService.registerSecureTransport(secure);
+ 
+        secure.receive(async (plaintext) => {
+          console.log(`[P2P Connection][${connKey}] Encrypted payload successfully decrypted:`, plaintext);
           try {
             const payload = JSON.parse(plaintext);
-
-            // Mark connection activity as alive for any received packet
-            const remoteId = currentSecureTransport?.getRemoteDeviceId();
+ 
+            const remoteId = secure.getRemoteDeviceId();
             if (remoteId) {
               chatService.updateTransportActivity(remoteId);
+            }
+ 
+            // ── Hub Relay Logic ──
+            // If the message is a chat or ack directed at another device, or is a broadcast type (location_share, sos),
+            // and we are the group owner (so we have other active transports), we act as a relay hub.
+            let isForMe = true;
+            let relayToId: string | null = null;
+            let isBroadcast = false;
+
+            if (payload.type === 'chat') {
+              isForMe = payload.recipientId === localDeviceId;
+              if (!isForMe) {
+                relayToId = payload.recipientId;
+              }
+            } else if (payload.type === 'ack') {
+              isForMe = payload.senderId === localDeviceId;
+              if (!isForMe) {
+                relayToId = payload.senderId;
+              }
+            } else if (payload.type === 'location_share' || payload.type === 'sos') {
+              isBroadcast = true;
+            }
+
+            if (relayToId) {
+              console.log(`[P2P Hub Relay] Relaying ${payload.type} packet to remote peer ${relayToId}`);
+              const targetTransport = chatService.getActiveTransport(relayToId);
+              if (targetTransport && targetTransport.isHandshakeComplete()) {
+                try {
+                  await targetTransport.send(plaintext);
+                } catch (err) {
+                  console.warn(`[P2P Hub Relay] Failed to relay packet to ${relayToId}:`, err);
+                }
+              }
+              // Do not process locally
+              return;
+            }
+
+            if (isBroadcast) {
+              // Relay broadcast to all other active transports
+              const allTransports = chatService.getAllActiveTransports();
+              allTransports.forEach(async (t, pId) => {
+                if (pId !== payload.senderId && t.isHandshakeComplete()) {
+                  try {
+                    await t.send(plaintext);
+                  } catch (err) {
+                    console.warn(`[P2P Hub Relay] Failed to relay broadcast to ${pId}:`, err);
+                  }
+                }
+              });
             }
 
             if (payload.type === 'chat') {
@@ -208,12 +236,11 @@ export function useInitializeServices() {
               console.log('[P2P Connection] Received SOS event payload:', payload);
               await sosService.handleIncomingSos(payload);
             } else if (payload.type === 'ping') {
-              // BUG 9 FIX: Resolve deviceId dynamically rather than relying on closure
               try {
                 const localUser = await new MobileRepository(db).getLocalUser();
-                const myId = localUser ? (localUser._raw as any).device_id : deviceId;
+                const myId = localUser ? (localUser._raw as any).device_id : localDeviceId;
                 const pongPayload = { type: 'pong', senderId: myId, timestamp: Date.now() };
-                await currentSecureTransport?.send(JSON.stringify(pongPayload));
+                await secure.send(JSON.stringify(pongPayload));
               } catch (err) {
                 console.warn('[P2P Connection] Failed sending pong response:', err);
               }
@@ -227,19 +254,17 @@ export function useInitializeServices() {
             console.error('Error handling incoming secure packet payload:', err);
           }
         });
-
-        // Handshake completion handler (registered before TCP opens)
-        currentSecureTransport.onHandshakeReady(async () => {
-          const remoteId = currentSecureTransport?.getRemoteDeviceId();
-          const remoteKey = currentSecureTransport?.getRemotePublicKey();
-          const remoteName = currentSecureTransport?.getRemoteDisplayName();
-          if (remoteId && currentSecureTransport) {
-            console.log(`[P2P Connection] Handshake completed successfully. Registering transport for remote peer: ${remoteId}`);
-            chatService.registerActiveTransport(remoteId, currentSecureTransport);
-            // Connection is fully established — allow future reconnect cycles
-            isPeerConnecting = false;
-
-            // Save remote user's display name and public key in known_peers
+ 
+        secure.onHandshakeReady(async () => {
+          const remoteId = secure.getRemoteDeviceId();
+          const remoteKey = secure.getRemotePublicKey();
+          const remoteName = secure.getRemoteDisplayName();
+          if (remoteId) {
+            console.log(`[P2P Connection][${connKey}] Handshake completed successfully. Registering transport for remote peer: ${remoteId}`);
+            entry.deviceId = remoteId;
+            chatService.registerActiveTransport(remoteId, secure);
+            connectingKeys.delete(connKey);
+ 
             const peersRepo = new MobileRepository(db);
             await peersRepo.addNewPeer({
               deviceId: remoteId,
@@ -248,26 +273,25 @@ export function useInitializeServices() {
               trustStatus: 'trusted',
               displayName: remoteName || undefined
             });
-
-            // Immediately send current location to newly paired peer if available
+ 
             try {
               const latestLoc = await db.get<LocationLog>('location_log')
                 .query(
-                  Q.where('device_id', deviceId),
+                  Q.where('device_id', localDeviceId),
                   Q.sortBy('timestamp', Q.desc),
                   Q.take(1)
                 ).fetch();
-
+ 
               if (latestLoc.length > 0) {
                 const loc = latestLoc[0]._raw as any;
                 const payload = {
                   type: 'location_share',
-                  senderId: deviceId,
+                  senderId: localDeviceId,
                   lat: loc.lat,
                   lng: loc.lng,
                   timestamp: Date.now()
                 };
-                await currentSecureTransport.send(JSON.stringify(payload));
+                await secure.send(JSON.stringify(payload));
                 console.log('[P2P Connection] Shared initial coordinates with remote peer.');
               }
             } catch (err) {
@@ -275,28 +299,139 @@ export function useInitializeServices() {
             }
           }
         });
-
+ 
+        raw.onDisconnect(() => {
+          const remoteId = entry.deviceId ?? secure.getRemoteDeviceId();
+          if (remoteId) {
+            console.log(`[P2P DEBUG][${connKey}] TCP socket disconnected. Unregistering transport for: ${remoteId}`);
+            chatService.unregisterActiveTransport(remoteId);
+          }
+          chatService.unregisterSecureTransport(secure);
+          connectionsByKey.delete(connKey);
+          connectingKeys.delete(connKey);
+ 
+          // Only the client role is exclusive to one group; losing our one
+          // client connection frees us up to look for (or accept) another.
+          // Losing one of several inbound connections as group owner should
+          // NOT reset serverSocketBound — the socket itself is still open
+          // for other/future clients.
+          if (groupRole === 'client') {
+            groupRole = 'unassigned';
+          }
+ 
+          console.log(`[P2P DEBUG][${connKey}] Disconnected. Triggering re-discovery...`);
+          AndroidWifiP2PTransport.discoverPeers().catch((err) =>
+            console.warn('[P2P DEBUG] Re-discovery after disconnect failed:', err)
+          );
+        });
+ 
+        return entry;
+      };
+ 
+      /**
+       * Dynamic initialization of BLE and Wi-Fi Direct transports once identity is loaded.
+       */
+      const initTransportsForUser = async (user: LocalUser) => {
+        const deviceId = (user._raw as any).device_id as string;
+        const role = (user._raw as any).role as any;
+        const publicKey = (user._raw as any).public_key as string;
+        const privateKey = await SecureStore.getItemAsync(`private_key_${deviceId}`);
+ 
+        if (!privateKey) {
+          console.warn('Private key not found in SecureStore. Session corrupted, logging out.');
+          await authService.logout();
+          dispatch(logout());
+          return;
+        }
+ 
+        console.log(`[P2P Bootstrap] Initializing transports for user: ${deviceId}`);
+ 
+        // Reset per-session state
+        connectingKeys.clear();
+        groupRole = 'unassigned';
+        serverSocketBound = false;
+ 
+        // TDOWN: Always remove/disconnect any pre-existing native Wi-Fi Direct groups first!
+        await performP2PCleanup('Bootstrap');
+ 
+        // Request Bluetooth permissions before starting advertising/scanning
+        const permissionsGranted = await requestBlePermissions();
+        if (!permissionsGranted) {
+          console.warn('[P2P Bootstrap] Bluetooth permissions not granted. Cannot start advertising or scanning.');
+          return;
+        }
+ 
+        // Stop any old transports
+        if (currentAdvertiser) await currentAdvertiser.stopAdvertising();
+        if (currentScanner) currentScanner.stopScanning();
+        for (const entry of Array.from(connectionsByKey.values())) {
+          await entry.raw.disconnect().catch(() => {});
+        }
+        connectionsByKey.clear();
+ 
+        const displayName = (user._raw as any).display_name || 'Peer';
+ 
+        // Instantiate Phase 2 BLE scanning & advertising
+        const pubKeyHash = publicKey.slice(0, 8); // 4-byte hash (8 hex chars)
+        currentAdvertiser = new BleAdvertiser(deviceId, role, pubKeyHash, displayName);
+        try {
+          await currentAdvertiser.startAdvertising();
+        } catch (err) {
+          console.warn('[P2P Bootstrap] Failed to start BLE advertising (check if Bluetooth is enabled):', err);
+        }
+ 
         // ── Wire up Wi-Fi Direct Group formation listeners ──
         unsubConnectionInfo = AndroidWifiP2PTransport.onConnectionInfo(async (info) => {
           console.log('[P2P DEBUG] Connection Info Event received:', info);
-          if (info.groupFormed && currentRawTransport) {
+          if (info.groupFormed) {
             let ownerAddress = info.groupOwnerAddress;
-            let isOwner = info.isGroupOwner;
-
+            const isOwner = info.isGroupOwner;
+ 
             if (isOwner) {
+              groupRole = 'owner';
               if (serverSocketBound) {
+                // NATIVE TODO: the current native bridge (WifiDirectTcpConnected /
+                // WifiDirectTcpData) models exactly one accepted socket with no
+                // per-connection ID. Re-opening here is skipped to avoid
+                // clobbering an existing connection, but a genuinely concurrent
+                // 3rd/4th client requires the native module to accept() in a
+                // loop and tag events with a connection id — that change has
+                // to happen in the (currently missing from this repo) Kotlin
+                // WifiDirect module.
                 console.log('[P2P DEBUG] Server socket already bound. Skipping duplicate openServerSocket.');
                 return;
               }
               console.log('[P2P DEBUG] I am Group Owner. Opening TCP server socket on port 8888...');
               try {
-                await currentRawTransport.openServerSocket(8888);
+                const raw = new AndroidWifiP2PTransport(deviceId);
+                const secure = new SecureTransport(raw, privateKey, publicKey, deviceId, displayName);
+                const connKey = `owner-socket-${Date.now()}`;
+                setupPeerConnection(connKey, raw, secure, deviceId);
+ 
+                raw.onConnect(async () => {
+                  console.log(`[P2P DEBUG][${connKey}] TCP Server received client connection. Initiating handshake...`);
+                  try {
+                    await secure.establishHandshake();
+                  } catch (err) {
+                    console.error('[P2P DEBUG] Failed establishing handshake on client connect:', err);
+                  }
+                });
+ 
+                await raw.openServerSocket(8888);
                 serverSocketBound = true;
                 console.log('[P2P DEBUG] TCP ServerSocket bound and listening on port 8888.');
               } catch (err) {
                 console.error('[P2P DEBUG] openServerSocket failed:', err);
               }
             } else {
+              groupRole = 'client';
+              const connKey = ownerAddress || 'pending-owner';
+ 
+              if (connectionsByKey.has(connKey) || connectingKeys.has(connKey)) {
+                console.log(`[P2P DEBUG] Already connected/connecting to owner ${connKey}. Ignoring duplicate event.`);
+                return;
+              }
+ 
               // Resolve empty owner address by fetching updated connection info with backoff
               if (!ownerAddress || ownerAddress === '') {
                 console.log('[P2P DEBUG] Group Owner Address is empty. Retrying updated connection info fetch...');
@@ -314,15 +449,22 @@ export function useInitializeServices() {
                   }
                 }
               }
-
+ 
               console.log('[P2P DEBUG] I am Client. Target Group Owner IP:', ownerAddress);
               if (!ownerAddress || ownerAddress === '') {
                 console.error('[P2P DEBUG] Cannot connect: Group Owner Address remains empty after retries. Resetting P2P group...');
-                isPeerConnecting = false;
+                groupRole = 'unassigned';
                 await performP2PCleanup('Client Empty GO IP');
                 return;
               }
-
+ 
+              const finalKey = ownerAddress;
+              connectingKeys.add(finalKey);
+ 
+              const raw = new AndroidWifiP2PTransport(deviceId);
+              const secure = new SecureTransport(raw, privateKey, publicKey, deviceId, displayName);
+              setupPeerConnection(finalKey, raw, secure, deviceId);
+ 
               // Retry with exponential backoff: 2s, 4s, 8s, 16s, 32s
               let delay = 2000;
               let connected = false;
@@ -330,19 +472,19 @@ export function useInitializeServices() {
                 try {
                   await new Promise((resolve) => setTimeout(resolve, delay));
                   console.log(`[P2P DEBUG] TCP connection attempt ${attempt}/5 to ${ownerAddress}:8888...`);
-                  await currentRawTransport.connectToSocket(ownerAddress, 8888);
+                  await raw.connectToSocket(ownerAddress, 8888);
                   connected = true;
                   console.log('[P2P DEBUG] TCP socket connected successfully!');
-                  if (currentSecureTransport) {
-                    console.log('[P2P DEBUG] Client establishing secure transport handshake...');
-                    await currentSecureTransport.establishHandshake();
-                  }
+                  console.log('[P2P DEBUG] Client establishing secure transport handshake...');
+                  await secure.establishHandshake();
                 } catch (err: any) {
                   delay = Math.min(delay * 2, 32000);
                   console.warn(`[P2P DEBUG] Attempt ${attempt}/5 failed: ${err.message || err}. Next retry in ${delay / 1000}s.`);
                   if (attempt === 5) {
                     console.error('[P2P DEBUG] Max connection retries reached. Group Owner unreachable. Resetting P2P group...');
-                    isPeerConnecting = false;
+                    groupRole = 'unassigned';
+                    connectingKeys.delete(finalKey);
+                    connectionsByKey.delete(finalKey);
                     await performP2PCleanup('Client Retry Max Failure');
                   }
                 }
@@ -351,78 +493,57 @@ export function useInitializeServices() {
           } else {
             console.log('[P2P DEBUG] Group is not formed (info.groupFormed is false). Resetting connection flags.');
             serverSocketBound = false;
-            isPeerConnecting = false;
+            groupRole = 'unassigned';
           }
         });
-
+ 
         unsubPeersChanged = AndroidWifiP2PTransport.onPeersChanged(async (peers) => {
           console.log('[P2P DEBUG] Wi-Fi Direct peers changed. Peers count:', peers.length, 'Peers:', peers);
-          if (!currentRawTransport || currentRawTransport.isConnected() || isPeerConnecting) {
-            console.log('[P2P DEBUG] Connection in progress, already connected, or raw transport not ready. Ignoring peers list.');
+ 
+          // A device already committed as a CLIENT of another group cannot
+          // also connect out to a second peer — that's a real Wi-Fi Direct
+          // constraint. But being the GROUP OWNER (or unassigned) should NOT
+          // stop us from inviting additional available peers in.
+          if (groupRole === 'client') {
+            console.log('[P2P DEBUG] Already a client of another group. Ignoring peers list.');
             return;
           }
-
-          if (!isInitiatorForAny) {
-            console.log('[P2P DEBUG] I am not the initiator. Ignoring peers list and waiting for incoming connection.');
-            return;
-          }
-
-          // Find an available peer (status 3 = AVAILABLE) matching our test devices (A32, A33, vivo, samsung)
-          const peer = peers.find((p) => 
-            p.status === 3 && 
-            (p.deviceName.toLowerCase().includes("a32") || 
-             p.deviceName.toLowerCase().includes("a33") || 
-             p.deviceName.toLowerCase().includes("vivo") || 
+ 
+          // Find peers that are AVAILABLE (status 3) and not already
+          // connected or mid-connection — this is now checked PER PEER
+          // instead of via a single global "is anyone connected" flag, so
+          // discovering a 3rd/4th device no longer gets silently dropped
+          // just because we already have one active connection.
+          const candidate = peers.find((p) =>
+            p.status === 3 &&
+            !connectionsByKey.has(p.deviceAddress) &&
+            !connectingKeys.has(p.deviceAddress) &&
+            (p.deviceName.toLowerCase().includes("a32") ||
+             p.deviceName.toLowerCase().includes("a33") ||
+             p.deviceName.toLowerCase().includes("vivo") ||
              p.deviceName.toLowerCase().includes("samsung"))
           );
-          if (!peer) {
-            console.log('[P2P DEBUG] No peers in the list are currently in AVAILABLE status.');
+          if (!candidate) {
+            console.log('[P2P DEBUG] No new AVAILABLE peers to connect to.');
             return;
           }
-          isPeerConnecting = true;
-          console.log('[P2P DEBUG] Selected target peer for Wi-Fi Direct connection:', peer.deviceName, peer.deviceAddress);
+ 
+          connectingKeys.add(candidate.deviceAddress);
+          console.log('[P2P DEBUG] Selected target peer for Wi-Fi Direct connection:', candidate.deviceName, candidate.deviceAddress);
           try {
-            await AndroidWifiP2PTransport.connectToPeer(peer.deviceAddress);
+            await AndroidWifiP2PTransport.connectToPeer(candidate.deviceAddress);
             console.log('[P2P DEBUG] Native connectToPeer call resolved successfully. Waiting for Group Formation connection info event...');
           } catch (err: any) {
             console.error('[P2P DEBUG] connectToPeer failed:', err);
+            connectingKeys.delete(candidate.deviceAddress);
             await new Promise((resolve) => setTimeout(resolve, 3000));
             await performP2PCleanup('Initiator Connect Failure');
-            isPeerConnecting = false;
           }
         });
-
-        // Server-side: initiate handshake when a client connects to the TCP ServerSocket
-        currentRawTransport.onConnect(async () => {
-          console.log('[P2P DEBUG] TCP Server received client connection. Initiating handshake...');
-          if (currentSecureTransport) {
-            try {
-              await currentSecureTransport.establishHandshake();
-            } catch (err) {
-              console.error('[P2P DEBUG] Failed establishing handshake on client connect:', err);
-            }
-          }
-        });
-
-        // On disconnect: unregister transport AND trigger re-discovery (BUG 7 FIX)
-        currentRawTransport.onDisconnect(() => {
-          const remoteId = currentSecureTransport?.getRemoteDeviceId();
-          if (remoteId) {
-            console.log(`[P2P DEBUG] TCP socket disconnected. Unregistering transport for: ${remoteId}`);
-            chatService.unregisterActiveTransport(remoteId);
-          }
-          serverSocketBound = false;
-          isPeerConnecting = false;
-          isInitiatorForAny = false;
-          console.log('[P2P DEBUG] Disconnected. Triggering re-discovery...');
-          AndroidWifiP2PTransport.discoverPeers().catch((err) =>
-            console.warn('[P2P DEBUG] Re-discovery after disconnect failed:', err)
-          );
-        });
-
+ 
         let lastDiscoverTime = 0;
         const scannedPeersCache = new Set<string>();
-
+ 
         // Wire up BLE discovery callback
         currentScanner = new BleScanner(async (peerDevice) => {
           if (!scannedPeersCache.has(peerDevice.deviceId)) {
@@ -453,16 +574,19 @@ export function useInitializeServices() {
               scannedPeersCache.delete(peerDevice.deviceId);
             }
           }
-
+ 
           mapService.updatePeerRssi(peerDevice.deviceId, peerDevice.rssi);
-
-          if (currentRawTransport && !currentRawTransport.isConnected()) {
+ 
+          // Same fix as onPeersChanged: only skip discovery for a peer we're
+          // already connected/connecting to (or if we're locked as a client
+          // elsewhere) — not just because *some* connection exists.
+          const alreadyConnected = connectionsByKey.has(peerDevice.deviceId) ||
+            Array.from(connectionsByKey.values()).some((c) => c.deviceId === peerDevice.deviceId);
+ 
+          if (groupRole !== 'client' && !alreadyConnected) {
             const isInitiator = deviceId < peerDevice.deviceId;
             console.log(`[P2P DEBUG] BLE Scanned Peer: ${peerDevice.deviceId.substring(0, 8)}. My ID: ${deviceId.substring(0, 8)}. isInitiator = ${isInitiator}`);
-            if (isInitiator) {
-              isInitiatorForAny = true;
-            }
-
+ 
             const now = Date.now();
             if (now - lastDiscoverTime > 15000) {
               lastDiscoverTime = now;
@@ -475,14 +599,14 @@ export function useInitializeServices() {
             }
           }
         });
-
+ 
         try {
           currentScanner.startScanning();
         } catch (err) {
           console.warn('[P2P Bootstrap] Failed to start BLE scanning (check if Bluetooth is enabled):', err);
         }
       };
-
+ 
       /**
        * Shuts down all active BLE advertisements, scanners, and socket streams.
        */
@@ -504,24 +628,24 @@ export function useInitializeServices() {
           currentScanner.destroy();
           currentScanner = undefined;
         }
-        if (currentRawTransport) {
-          await currentRawTransport.disconnect();
-          currentRawTransport = undefined;
+        for (const entry of Array.from(connectionsByKey.values())) {
+          await entry.raw.disconnect().catch(() => {});
+          chatService.unregisterSecureTransport(entry.secure);
         }
-        if (currentSecureTransport) {
-          chatService.unregisterSecureTransport(currentSecureTransport);
-          currentSecureTransport = undefined;
-        }
+        connectionsByKey.clear();
+        connectingKeys.clear();
+        groupRole = 'unassigned';
+        serverSocketBound = false;
         // Stop the heartbeat timer in ChatService
         chatService.destroy();
       };
-
+ 
       // 3. Auto-Login Recovery Checks
       const existingUser = await authService.getCurrentUser();
       if (existingUser) {
         await initTransportsForUser(existingUser);
       }
-
+ 
       setServices({
         authService,
         chatService,
@@ -532,15 +656,15 @@ export function useInitializeServices() {
         shutdownTransports
       });
     };
-
+ 
     let cleanupTransports: (() => Promise<void>) | null = null;
     let initTransportsRef: ((user: LocalUser) => Promise<void>) | null = null;
     let servicesRef: typeof services | null = null;
-
+ 
     initAsync().catch((error) => {
       console.error('Failed to bootstrap services:', error);
     });
-
+ 
     // Capture refs for AppState handler after services are initialized
     const servicesUpdateUnsub = setInterval(() => {
       setServices((prev) => {
@@ -552,14 +676,14 @@ export function useInitializeServices() {
         return prev;
       });
     }, 500);
-
+ 
     // ENHANCEMENT 7: AppState handler disabled for background P2P reliability
     const handleAppStateChange = async (nextState: AppStateStatus) => {
       console.log('[P2P Bootstrap] AppState transition to:', nextState, '(Transports kept active)');
     };
-
+ 
     const appStateSub = AppState.addEventListener('change', handleAppStateChange);
-
+ 
     return () => {
       clearInterval(servicesUpdateUnsub);
       appStateSub.remove();
@@ -571,6 +695,6 @@ export function useInitializeServices() {
       }
     };
   }, []);
-
+ 
   return services;
 }

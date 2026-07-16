@@ -79,15 +79,13 @@ export class SosService {
     };
 
     // 4. Send to all active peer connections
-    for (const peer of peers) {
-      const rawPeer = peer._raw as any;
-      const secureTransport = this.chatService.getActiveTransport(rawPeer.device_id);
-      
+    const activeTransports = this.chatService.getAllActiveTransports();
+    for (const [peerId, secureTransport] of Array.from(activeTransports.entries())) {
       if (secureTransport && secureTransport.isHandshakeComplete()) {
         try {
           await secureTransport.send(JSON.stringify(sosPayload));
         } catch (error) {
-          console.warn(`Failed to broadcast SOS to peer ${rawPeer.device_id}`, error);
+          console.warn(`Failed to broadcast SOS to peer ${peerId}`, error);
         }
       }
     }
@@ -120,7 +118,7 @@ export class SosService {
     });
 
     // 2. Send notification to the reporter (victim)
-    const secureTransport = this.chatService.getActiveTransport((incident._raw as any).reporter_id);
+    const secureTransport = this.chatService.getOutboundTransport((incident._raw as any).reporter_id);
     if (secureTransport && secureTransport.isHandshakeComplete()) {
       try {
         const assignmentMessage = {

@@ -147,6 +147,18 @@ export class ChatService {
     return this.activeTransports.get(peerId);
   }
 
+  getOutboundTransport(recipientId: string): SecureTransport | undefined {
+    let transport = this.getActiveTransport(recipientId);
+    if (transport) return transport;
+
+    // Fallback: if we are a client in a group and have exactly 1 active transport,
+    // that transport is our Group Owner/hub. Route all outbound traffic through it.
+    if (this.activeTransports.size === 1) {
+      return Array.from(this.activeTransports.values())[0];
+    }
+    return undefined;
+  }
+
   getAllActiveTransports(): Map<string, SecureTransport> {
     return this.activeTransports;
   }
@@ -296,7 +308,7 @@ export class ChatService {
     });
 
     // 2. Attempt transmission if peer is active
-    let secureTransport = this.getActiveTransport(recipientId);
+    let secureTransport = this.getOutboundTransport(recipientId);
     
     // Self-healing: if no active registered transport, check if we have a connected transport that just needs a handshake
     if (!secureTransport) {
@@ -386,7 +398,7 @@ export class ChatService {
    * existing ping/pong heartbeat pattern already used on this transport.
    */
   private async sendDeliveryAck(messageId: string, originalSenderId: string): Promise<void> {
-    const transport = this.getActiveTransport(originalSenderId);
+    const transport = this.getOutboundTransport(originalSenderId);
     if (!transport || !transport.isHandshakeComplete()) {
       // No live connection back to them right now — nothing to do. If they
       // reconnect and retry the message (see retryPendingMessages), our
