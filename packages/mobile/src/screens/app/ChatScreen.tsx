@@ -171,7 +171,7 @@ export default function ChatScreen({ route, navigation }: any) {
       .observeMessagesByRecipient(recipientId, localDeviceId)
       .subscribe({
         next: (dbMessages) => {
-          const displayed = dbMessages.map((m) => toDisplayMessage(m, localDeviceId));
+          const displayed = dbMessages.slice().reverse().map((m) => toDisplayMessage(m, localDeviceId));
           setMessages(displayed);
           // Scroll to bottom on new messages
           setTimeout(() => flatListRef.current?.scrollToEnd({ animated: true }), 100);

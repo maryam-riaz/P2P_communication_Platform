@@ -512,8 +512,8 @@ export function useInitializeServices() {
                 clientEntry.deviceAddress = lastTargetMacAddress;
               }
  
-              // Retry with exponential backoff: 2s, 4s, 8s, 16s, 32s
-              let delay = 2000;
+              // Retry with exponential backoff: 500ms, 1s, 2s, 4s, 8s
+              let delay = 500;
               let connected = false;
               for (let attempt = 1; attempt <= 5 && !connected; attempt++) {
                 try {

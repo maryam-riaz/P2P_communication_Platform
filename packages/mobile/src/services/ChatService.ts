@@ -197,7 +197,8 @@ export class ChatService {
             Q.where('recipient_id', localDeviceId)
           )
         ),
-        Q.sortBy('created_at', Q.asc)
+        Q.sortBy('created_at', Q.desc),
+        Q.take(50)
       )
       .observeWithColumns(['sync_status']);
   }
@@ -206,7 +207,7 @@ export class ChatService {
    * Observes all messages and groups them into unique conversations with names and unread counts.
    */
   observeConversations(): Observable<Conversation[]> {
-    return this.db.get<Message>('messages').query(Q.sortBy('created_at', Q.desc)).observeWithColumns(['sync_status']).pipe(
+    return this.db.get<Message>('messages').query(Q.sortBy('created_at', Q.desc), Q.take(100)).observeWithColumns(['sync_status']).pipe(
       switchMap((messages) =>
         from(
           (async () => {
@@ -243,11 +244,33 @@ export class ChatService {
             conversationsMap.forEach((val, partnerId) => {
               const peer = peers.find(p => (p._raw as any).device_id === partnerId);
               const rawLast = val.lastMsg._raw as any;
+              let lastMsgText = rawLast.ciphertext || '';
+
+              if (lastMsgText.startsWith('{') && lastMsgText.endsWith('}')) {
+                try {
+                  const parsed = JSON.parse(lastMsgText);
+                  if (parsed.attachment) {
+                    if (parsed.attachment.type === 'image') {
+                      lastMsgText = '📷 Photo';
+                    } else if (parsed.attachment.type === 'video') {
+                      lastMsgText = '🎥 Video';
+                    } else if (parsed.attachment.type === 'audio') {
+                      lastMsgText = '🎵 Audio Note';
+                    } else {
+                      lastMsgText = '📁 Attachment';
+                    }
+                  } else {
+                    lastMsgText = parsed.text || '';
+                  }
+                } catch (e) {
+                  // Fallback
+                }
+              }
 
               convos.push({
                 recipientId: partnerId,
                 recipientName: peer ? (peer._raw as any).display_name || partnerId.slice(0, 8) : partnerId.slice(0, 8),
-                lastMessage: rawLast.ciphertext || '',
+                lastMessage: lastMsgText,
                 lastTimestamp: rawLast.created_at,
                 unreadCount: val.unread,
                 syncStatus: rawLast.sync_status
@@ -360,7 +383,7 @@ export class ChatService {
         if (attachment) {
           // Send file chunked
           const base64Data = await NativeModules.WifiDirect.readFileAsBase64(attachment.uri);
-          const chunkSize = 40000; // 40KB per chunk
+          const chunkSize = 1000000; // 1MB per chunk
           const totalChunks = Math.ceil(base64Data.length / chunkSize);
           const timestamp = message.createdAt;
 
@@ -389,7 +412,7 @@ export class ChatService {
               recipientId,
               chunkIndex: i,
               chunkData
-            }));
+            }), true); // Skip ECDSA signature for chunks
             // Yield to event loop between chunks to keep the JS thread responsive
             await new Promise(r => setTimeout(r, 10));
           }

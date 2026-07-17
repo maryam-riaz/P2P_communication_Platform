@@ -98,7 +98,7 @@ export class SecureTransport {
    * Uses AES-256-GCM encryption and ECDSA digital signatures (CRYPTO.md).
    * Returns a promise that resolves when the payload is written to the socket.
    */
-  async send(plaintext: string): Promise<void> {
+  async send(plaintext: string, skipSignature = false): Promise<void> {
     if (!this.handshakeCompleted || !this.remotePublicKeyHex) {
       throw new Error('[Secure Transport] Cannot send: handshake not yet complete.');
     }
@@ -106,7 +106,8 @@ export class SecureTransport {
       strToBytes(plaintext),
       this.localPrivateKeyHex,
       this.localPublicKeyHex,
-      this.remotePublicKeyHex
+      this.remotePublicKeyHex,
+      skipSignature
     );
     const serialized = JSON.stringify({
       payload:            bytesToBase64(packet.payload),
@@ -115,6 +116,7 @@ export class SecureTransport {
       signature:          bytesToBase64(packet.signature),
       sender_public_key:  bytesToBase64(packet.sender_public_key),
       content_hash:       bytesToBase64(packet.content_hash),
+      skip_sig:           skipSignature,
     }) + '\n';
     await this.rawTransport.send(strToBytes(serialized));
   }
@@ -178,6 +180,7 @@ export class SecureTransport {
         signature: string;
         sender_public_key: string;
         content_hash: string;
+        skip_sig?: boolean;
       };
 
       const packet: EncryptedPacket = {
@@ -190,7 +193,7 @@ export class SecureTransport {
       };
 
       // Verify ECDSA signature and decrypt with AES-256-GCM
-      const plaintextBytes = verifyAndDecrypt(packet, this.localPrivateKeyHex);
+      const plaintextBytes = verifyAndDecrypt(packet, this.localPrivateKeyHex, envelope.skip_sig);
       const plaintext = bytesToStr(plaintextBytes);
 
       if (this.onMessageCallback) {

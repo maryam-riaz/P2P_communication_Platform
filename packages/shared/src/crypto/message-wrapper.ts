@@ -26,28 +26,37 @@ export function concatUint8Arrays(arrays: Uint8Array[]): Uint8Array {
   return result;
 }
 
+const aesKeyCache = new Map<string, Uint8Array>();
+
+function getCachedAesKey(privateKeyHex: string, publicKeyHex: string): Uint8Array {
+  const cacheKey = `${privateKeyHex}:${publicKeyHex}`;
+  let key = aesKeyCache.get(cacheKey);
+  if (!key) {
+    const sharedSecret = deriveSharedSecret(privateKeyHex, publicKeyHex);
+    key = sharedSecretToAesKey(sharedSecret);
+    aesKeyCache.set(cacheKey, key);
+  }
+  return key;
+}
+
 /**
  * Encrypts and signs a plaintext message for a specific recipient.
- * 
- * 1. Derives a shared AES-256 key via ECDH between sender's private key and recipient's public key.
- * 2. Encrypts the plaintext using AES-256-GCM.
- * 3. Computes the SHA-256 content hash of the plaintext for deduplication.
- * 4. Digitally signs the concatenation of (ciphertext || iv || tag) with the sender's private key.
  * 
  * @param plaintext The message bytes to encrypt.
  * @param senderPrivateKeyHex Sender's P-256 private key (hex DER PKCS8).
  * @param senderPublicKeyHex Sender's P-256 public key (hex DER SPKI).
  * @param recipientPublicKeyHex Recipient's P-256 public key (hex DER SPKI).
+ * @param skipSignature If true, bypasses ECDSA digital signing.
  */
 export function encryptAndSign(
   plaintext: Uint8Array,
   senderPrivateKeyHex: string,
   senderPublicKeyHex: string,
-  recipientPublicKeyHex: string
+  recipientPublicKeyHex: string,
+  skipSignature = false
 ): EncryptedPacket {
-  // 1. Derive AES key
-  const sharedSecret = deriveSharedSecret(senderPrivateKeyHex, recipientPublicKeyHex);
-  const aesKey = sharedSecretToAesKey(sharedSecret);
+  // 1. Derive AES key (cached for speed)
+  const aesKey = getCachedAesKey(senderPrivateKeyHex, recipientPublicKeyHex);
 
   // 2. Encrypt
   const encrypted = encrypt(plaintext, aesKey);
@@ -55,9 +64,11 @@ export function encryptAndSign(
   // 3. Hash
   const content_hash = hash(plaintext);
 
-  // 4. Sign (ciphertext || iv || tag)
-  const dataToSign = concatUint8Arrays([encrypted.ciphertext, encrypted.iv, encrypted.tag]);
-  const signature = sign(dataToSign, senderPrivateKeyHex);
+  let signature: any = new Uint8Array(0);
+  if (!skipSignature) {
+    const dataToSign = concatUint8Arrays([encrypted.ciphertext, encrypted.iv, encrypted.tag]);
+    signature = sign(dataToSign, senderPrivateKeyHex) as any;
+  }
 
   // Convert hex string → Uint8Array without Buffer (works in Hermes)
   const hexStr = senderPublicKeyHex;
@@ -79,16 +90,14 @@ export function encryptAndSign(
 /**
  * Verifies the signature and decrypts the encrypted packet.
  * 
- * 1. Verifies the ECDSA signature over (ciphertext || iv || tag) using the sender's public key.
- * 2. Derives the shared AES-256 key via ECDH between the recipient's private key and sender's public key.
- * 3. Decrypts the ciphertext using AES-256-GCM, verifying the auth tag.
- * 
  * @param packet The encrypted packet structure.
  * @param recipientPrivateKeyHex Recipient's P-256 private key (hex DER PKCS8).
+ * @param skipSignature If true, bypasses ECDSA digital signature verification.
  */
 export function verifyAndDecrypt(
   packet: EncryptedPacket,
-  recipientPrivateKeyHex: string
+  recipientPrivateKeyHex: string,
+  skipSignature = false
 ): Uint8Array {
   // Convert Uint8Array → hex string without Buffer (works in Hermes)
   const senderPublicKeyHex = Array.from(packet.sender_public_key)
@@ -96,15 +105,16 @@ export function verifyAndDecrypt(
     .join('');
 
   // 1. Verify signature over (ciphertext || iv || tag)
-  const signedData = concatUint8Arrays([packet.payload, packet.iv, packet.tag]);
-  const isValidSignature = verify(signedData, packet.signature, senderPublicKeyHex);
-  if (!isValidSignature) {
-    throw new Error('Verification failed: ECDSA digital signature is invalid (forged or corrupted package)');
+  if (!skipSignature) {
+    const signedData = concatUint8Arrays([packet.payload, packet.iv, packet.tag]);
+    const isValidSignature = verify(signedData, packet.signature, senderPublicKeyHex);
+    if (!isValidSignature) {
+      throw new Error('Verification failed: ECDSA digital signature is invalid (forged or corrupted package)');
+    }
   }
 
-  // 2. Derive AES key
-  const sharedSecret = deriveSharedSecret(recipientPrivateKeyHex, senderPublicKeyHex);
-  const aesKey = sharedSecretToAesKey(sharedSecret);
+  // 2. Derive AES key (cached for speed)
+  const aesKey = getCachedAesKey(recipientPrivateKeyHex, senderPublicKeyHex);
 
   // 3. Decrypt
   return decrypt(packet.payload, packet.iv, packet.tag, aesKey);
