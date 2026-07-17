@@ -210,16 +210,37 @@ export class AndroidWifiP2PTransport implements PeerTransport {
   private setupNativeListeners(): void {
     if (!this.wifiDirectEmitter) return;
 
+    // Fast lookup table for high-performance base64 to Uint8Array decoding
+    const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+    const lookup = new Uint8Array(256);
+    for (let i = 0; i < chars.length; i++) {
+      lookup[chars.charCodeAt(i)] = i;
+    }
+
     // Incoming data: base64-encoded bytes from the Kotlin read loop
     this.dataSubscription = this.wifiDirectEmitter.addListener(
       'WifiDirectTcpData',
       (base64: string) => {
         if (this.messageCallback) {
-          // Decode base64 → Uint8Array without Buffer (not available in RN)
-          const binary = atob(base64);
-          const bytes = new Uint8Array(binary.length);
-          for (let i = 0; i < binary.length; i++) {
-            bytes[i] = binary.charCodeAt(i);
+          const str = base64.replace(/=+$/, '');
+          const len = str.length;
+          const byteLen = Math.floor((len * 3) / 4);
+          const bytes = new Uint8Array(byteLen);
+          
+          let p = 0;
+          for (let i = 0; i < len; i += 4) {
+            const w1 = lookup[str.charCodeAt(i)] || 0;
+            const w2 = i + 1 < len ? lookup[str.charCodeAt(i + 1)] || 0 : 0;
+            const w3 = i + 2 < len ? lookup[str.charCodeAt(i + 2)] || 0 : 0;
+            const w4 = i + 3 < len ? lookup[str.charCodeAt(i + 3)] || 0 : 0;
+
+            const byte1 = (w1 << 2) | (w2 >> 4);
+            const byte2 = ((w2 & 15) << 4) | (w3 >> 2);
+            const byte3 = ((w3 & 3) << 6) | w4;
+
+            if (p < byteLen) bytes[p++] = byte1;
+            if (i + 2 < len && p < byteLen) bytes[p++] = byte2;
+            if (i + 3 < len && p < byteLen) bytes[p++] = byte3;
           }
           this.messageCallback(bytes);
         }
@@ -305,12 +326,15 @@ export class AndroidWifiP2PTransport implements PeerTransport {
     if (!this.isConnectedFlag || !WifiDirect) {
       throw new Error('[Android Wi-Fi Direct] Cannot send: transport is not connected.');
     }
-    // Encode Uint8Array → base64 without Buffer (not available in RN)
+    // High-performance Uint8Array → base64 conversion using chunks to prevent call stack overflow
+    const CHUNK_SIZE = 0x4000; // 16384
     let binary = '';
-    for (let i = 0; i < data.length; i++) {
-      binary += String.fromCharCode(data[i]);
+    for (let i = 0; i < data.length; i += CHUNK_SIZE) {
+      const chunk = data.subarray(i, i + CHUNK_SIZE);
+      binary += String.fromCharCode.apply(null, chunk as any);
     }
     const base64 = btoa(binary);
+
     // In JEST test environment, the mock requires the isServer flag to route the simulated Node.js TCP sockets.
     // In the real native Android runtime, the native JSI/Bridge only accepts exactly 1 argument (base64).
     const isTest = typeof afterEach === 'function';

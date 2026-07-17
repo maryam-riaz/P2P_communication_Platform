@@ -580,11 +580,7 @@ export function useInitializeServices() {
           // just because we already have one active connection.
           const candidates = peers.filter((p) =>
             p.status === 3 &&
-            !isAlreadyConnectedOrConnecting(p.deviceAddress, p.deviceName) &&
-            (p.deviceName.toLowerCase().includes("a32") ||
-             p.deviceName.toLowerCase().includes("a33") ||
-             p.deviceName.toLowerCase().includes("vivo") ||
-             p.deviceName.toLowerCase().includes("samsung"))
+            !isAlreadyConnectedOrConnecting(p.deviceAddress, p.deviceName)
           );
 
           if (candidates.length === 0) {
@@ -600,32 +596,53 @@ export function useInitializeServices() {
           let candidateToConnect: typeof candidates[0] | null = null;
 
           for (const c of candidates) {
-            // 1. Live BLE map - most reliable
-            const sanitizedCandidateName = c.deviceName.replace(/[^a-zA-Z0-9 ]/g, '').toLowerCase();
-            const bleRemoteId = bleDiscoveredIds.get(sanitizedCandidateName);
-            if (bleRemoteId) {
+            // 1. Live BLE map lookup — collision-safe compound key.
+            //
+            // BLE advertiser broadcasts local name "DP2P:Maryam:4ba05e47".
+            // We store bleDiscoveredIds with key "maryam:4ba05e47" -> fullDeviceId.
+            //
+            // Wi-Fi Direct shows "Maryam's A32". Extract the first word
+            // ("maryam") then scan the map for ALL keys starting with
+            // "maryam:" — gives us a list of candidates by that name.
+            // If there is exactly one, use it. If multiple (name collision),
+            // fall through to the name-based fallback.
+            const wifiName = c.deviceName;
+            const firstWordKey = wifiName.split(/['\s]/)[0].toLowerCase();
+            const blePrefix = firstWordKey + ':';
+
+            // Gather all BLE-map entries whose key starts with this prefix
+            const bleMatches: string[] = [];
+            for (const [key, val] of bleDiscoveredIds.entries()) {
+              if (key.startsWith(blePrefix)) bleMatches.push(val);
+            }
+
+            if (bleMatches.length === 1) {
+              // Unambiguous: exactly one BLE peer with this first name
+              const bleRemoteId = bleMatches[0];
               const isInitiator = deviceId < bleRemoteId;
-              console.log(`[P2P DEBUG] Candidate ${c.deviceName} resolved via BLE map => ${bleRemoteId.substring(0, 8)}. isInitiator = ${isInitiator}`);
+              console.log(`[P2P DEBUG] Candidate '${wifiName}' resolved via BLE map => ${bleRemoteId.substring(0, 8)}. isInitiator=${isInitiator}`);
               if (isInitiator) {
                 candidateToConnect = c;
                 break;
               }
-              // Not the initiator for this peer - continue
               continue;
+            } else if (bleMatches.length > 1) {
+              console.log(`[P2P DEBUG] Candidate '${wifiName}' has ${bleMatches.length} BLE matches (name collision). Falling to name fallback.`);
             }
 
-            // 2. Symmetric display-name-based fallback (no BLE data yet)
-            const localName = displayName.replace(/[^a-zA-Z0-9 ]/g, '').toLowerCase();
-            const remoteName = sanitizedCandidateName;
-            let isInitiatorFallback = false;
-            if (localName !== remoteName) {
-              isInitiatorFallback = localName < remoteName;
+            // 2. Name-based fallback — symmetric & collision-safe.
+            // Compare the first word of our own display name with the
+            // first word of the Wi-Fi Direct peer name. Lower name wins.
+            const localFirstWord = displayName.split(/['\s]/)[0].toLowerCase();
+            let isInitiatorFallback: boolean;
+            if (localFirstWord !== firstWordKey) {
+              isInitiatorFallback = localFirstWord < firstWordKey;
             } else {
-              // If display names are identical, fall back to MAC address / UUID comparison
+              // True name collision: fall back to MAC / UUID comparison
               const localMac = AndroidWifiP2PTransport.localMacAddress?.toLowerCase() || deviceId.toLowerCase();
               isInitiatorFallback = localMac < c.deviceAddress.toLowerCase();
             }
-            console.log(`[P2P DEBUG] Candidate ${c.deviceName} NOT in BLE map. Name fallback: local=${localName} remote=${remoteName} isInitiator = ${isInitiatorFallback}`);
+            console.log(`[P2P DEBUG] Candidate '${wifiName}' name fallback: local='${localFirstWord}' remote='${firstWordKey}' isInitiator=${isInitiatorFallback}`);
             if (isInitiatorFallback) {
               candidateToConnect = c;
               break;
@@ -695,12 +712,17 @@ export function useInitializeServices() {
  
           mapService.updatePeerRssi(peerDevice.deviceId, peerDevice.rssi);
  
-          // â”€â”€ Update live BLE-first resolution map â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-          // Store / overwrite the mapping every scan so we always have the
-          // freshest device_id for each display name, regardless of what the
-          // known_peers DB says. This is what onPeersChanged reads first.
+          // ── Update live BLE-first resolution map ─────────────────────────────
+          // Store the deviceId keyed by multiple name variants so onPeersChanged
+          // can reliably match regardless of the Wi-Fi Direct device name format.
           if (peerDevice.displayName) {
-            bleDiscoveredIds.set(peerDevice.displayName.toLowerCase(), peerDevice.deviceId);
+            // Use compound key "firstWord:idPrefix" (e.g. "maryam:4ba05e47")
+            // so multiple users with the same first name don't collide.
+            const firstWord = peerDevice.displayName.split(/['\s]/)[0].toLowerCase();
+            const idPrefix = peerDevice.deviceId.substring(0, 8).toLowerCase();
+            const compoundKey = `${firstWord}:${idPrefix}`;
+            bleDiscoveredIds.set(compoundKey, peerDevice.deviceId);
+            console.log(`[P2P DEBUG] BLE map updated: '${compoundKey}' => ${peerDevice.deviceId.substring(0, 8)}`);
           }
 
           // Same fix as onPeersChanged: only skip discovery for a peer we're
@@ -710,11 +732,10 @@ export function useInitializeServices() {
             Array.from(connectionsByKey.values()).some((c) => c.deviceId === peerDevice.deviceId);
  
           if (groupRole !== 'client' && !alreadyConnected) {
-            const isInitiator = deviceId < peerDevice.deviceId;
-            console.log(`[P2P DEBUG] BLE Scanned Peer: ${peerDevice.deviceId.substring(0, 8)}. My ID: ${deviceId.substring(0, 8)}. isInitiator = ${isInitiator}`);
+            console.log(`[P2P DEBUG] BLE Scanned Peer: ${peerDevice.deviceId.substring(0, 8)}. My ID: ${deviceId.substring(0, 8)}.`);
  
             const now = Date.now();
-            if (now - lastDiscoverTime > 15000) {
+            if (now - lastDiscoverTime > 5000) {
               lastDiscoverTime = now;
               console.log('[P2P DEBUG] Triggering native Wi-Fi Direct peer discovery (throttled)...');
               try {

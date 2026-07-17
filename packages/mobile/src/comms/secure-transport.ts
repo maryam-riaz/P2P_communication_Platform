@@ -83,6 +83,14 @@ export class SecureTransport {
   }
 
   /**
+   * Returns the underlying raw transport so callers can send unencrypted bytes
+   * directly (e.g., large file chunks where AES overhead is prohibitive).
+   */
+  getRawTransport(): PeerTransport {
+    return this.rawTransport;
+  }
+
+  /**
    * Registers a callback triggered when the key exchange completes and the secure channel is ready.
    */
   onHandshakeReady(callback: () => void): void {
@@ -165,7 +173,16 @@ export class SecureTransport {
       return;
     }
 
-    // Case 2: Encrypted JSON packet
+    // Case 2: Raw (unencrypted) file chunk — sent directly via rawTransport for speed.
+    // Detected by the plain JSON 'type' field without an encryption envelope.
+    if (rawStr.startsWith('{"type":"chat_file_chunk"')) {
+      if (this.onMessageCallback) {
+        this.onMessageCallback(rawStr);
+      }
+      return;
+    }
+
+    // Case 3: Encrypted JSON packet
     if (!this.handshakeCompleted) {
       console.warn('[Secure Transport] Received data before identity exchange completed. Packet dropped.');
       return;

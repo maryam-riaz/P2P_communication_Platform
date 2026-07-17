@@ -21,7 +21,7 @@ import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { useFocusEffect } from '@react-navigation/native';
 import * as DocumentPicker from 'expo-document-picker';
 import * as ImagePicker from 'expo-image-picker';
-import { Audio } from 'expo-av';
+import { Audio, Video, ResizeMode } from 'expo-av';
 import { Image } from 'expo-image';
 import { useService } from '../../hooks/useService';
 import { ChatService } from '../../services/ChatService';
@@ -155,6 +155,8 @@ export default function ChatScreen({ route, navigation }: any) {
 
   // Full Screen Image Preview modal
   const [previewImage, setPreviewImage] = useState<string | null>(null);
+  // Full Screen Video Preview modal
+  const [previewVideo, setPreviewVideo] = useState<string | null>(null);
 
   // Resolve local device ID once for message side detection
   useEffect(() => {
@@ -165,7 +167,7 @@ export default function ChatScreen({ route, navigation }: any) {
 
   // Subscribe to live messages for this conversation
   useEffect(() => {
-    if (!recipientId) return;
+    if (!recipientId || !localDeviceId) return;
 
     const subscription = chatService
       .observeMessagesByRecipient(recipientId, localDeviceId)
@@ -567,17 +569,21 @@ export default function ChatScreen({ route, navigation }: any) {
 
     if (attachment.type === 'video') {
       return (
-        <View style={styles.videoContainer}>
+        <TouchableOpacity
+          style={styles.videoContainer}
+          onPress={() => setPreviewVideo(attachment.uri)}
+          activeOpacity={0.8}
+        >
           <View style={styles.videoPlaceholder}>
             <MaterialCommunityIcons name="video" size={32} color="#FFF" />
             <Text style={styles.videoText} numberOfLines={1}>
               🎥 {attachment.name}
             </Text>
           </View>
-          <TouchableOpacity style={styles.videoPlayOverlay}>
+          <View style={styles.videoPlayOverlay} pointerEvents="none">
             <MaterialCommunityIcons name="play-circle-outline" size={48} color="#FF8C42" />
-          </TouchableOpacity>
-        </View>
+          </View>
+        </TouchableOpacity>
       );
     }
 
@@ -778,6 +784,30 @@ export default function ChatScreen({ route, navigation }: any) {
               source={{ uri: previewImage }}
               style={styles.modalImage}
               contentFit="contain"
+            />
+          )}
+        </View>
+      </Modal>
+
+      {/* Video Player Modal */}
+      <Modal
+        visible={previewVideo !== null}
+        transparent={true}
+        animationType="fade"
+        onRequestClose={() => setPreviewVideo(null)}
+      >
+        <View style={styles.modalBackground}>
+          <TouchableOpacity style={styles.modalCloseButton} onPress={() => setPreviewVideo(null)}>
+            <MaterialCommunityIcons name="close" size={32} color="#FFF" />
+          </TouchableOpacity>
+          {previewVideo && (
+            <Video
+              source={{ uri: previewVideo }}
+              style={styles.modalVideo}
+              useNativeControls
+              resizeMode={ResizeMode.CONTAIN}
+              shouldPlay
+              isLooping={false}
             />
           )}
         </View>
@@ -1074,5 +1104,9 @@ const styles = StyleSheet.create({
   modalImage: {
     width: '90%',
     height: '80%',
+  },
+  modalVideo: {
+    width: '100%',
+    height: '70%',
   },
 });

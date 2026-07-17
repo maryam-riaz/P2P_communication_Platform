@@ -381,13 +381,18 @@ export class ChatService {
         const myDeviceId = localUser ? (localUser._raw as any).device_id : 'unknown';
 
         if (attachment) {
-          // Send file chunked
+          // Fast file transfer: only metadata is encrypted via SecureTransport.
+          // Raw chunk bytes are sent directly through the underlying TCP transport
+          // to avoid per-chunk AES-256-GCM overhead (~200-500ms/chunk in JS).
+          // The Wi-Fi Direct TCP link is already on a private local network group.
+          const rawTransport = secureTransport.getRawTransport();
+
           const base64Data = await NativeModules.WifiDirect.readFileAsBase64(attachment.uri);
-          const chunkSize = 1000000; // 1MB per chunk
+          const chunkSize = 1.5 * 1024 * 1024; // 1.5MB per chunk — balance speed & memory
           const totalChunks = Math.ceil(base64Data.length / chunkSize);
           const timestamp = message.createdAt;
 
-          // 1. Send chat_file_start
+          // 1. Send metadata via SecureTransport (encrypted + signed)
           await secureTransport.send(JSON.stringify({
             type: 'chat_file_start',
             messageId: message.id,
@@ -399,25 +404,28 @@ export class ChatService {
             timestamp
           }));
 
-          // Yield to event loop
-          await new Promise(r => setTimeout(r, 20));
-
-          // 2. Send all chunks
+          // 2. Send all chunks raw (no AES), prefixed with a small JSON header line
+          //    so the receiver can parse them without the SecureTransport layer.
           for (let i = 0; i < totalChunks; i++) {
             const chunkData = base64Data.substring(i * chunkSize, (i + 1) * chunkSize);
-            await secureTransport.send(JSON.stringify({
+            const chunkEnvelope = JSON.stringify({
               type: 'chat_file_chunk',
               messageId: message.id,
               senderId: myDeviceId,
               recipientId,
               chunkIndex: i,
+              totalChunks,
               chunkData
-            }), true); // Skip ECDSA signature for chunks
-            // Yield to event loop between chunks to keep the JS thread responsive
-            await new Promise(r => setTimeout(r, 10));
+            }) + '\n';
+            const encoded = new TextEncoder().encode(chunkEnvelope);
+            await rawTransport.send(encoded);
+            
+            // Yield to the React Native bridge and socket buffer to prevent congestion
+            await new Promise(r => setTimeout(r, 50));
           }
 
-          // 3. Send chat_file_end
+
+          // 3. Send end marker via SecureTransport (encrypted + signed)
           await secureTransport.send(JSON.stringify({
             type: 'chat_file_end',
             messageId: message.id,
