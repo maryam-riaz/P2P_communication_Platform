@@ -182,6 +182,27 @@ export function useInitializeServices() {
         const entry: PeerConnection = { connKey, raw, secure };
         connectionsByKey.set(connKey, entry);
         chatService.registerSecureTransport(secure);
+
+        let handshakeRecoveryTimer: ReturnType<typeof setInterval> | null = null;
+        const clearHandshakeRecovery = () => {
+          if (handshakeRecoveryTimer) {
+            clearInterval(handshakeRecoveryTimer);
+            handshakeRecoveryTimer = null;
+          }
+        };
+        const scheduleHandshakeRecovery = () => {
+          clearHandshakeRecovery();
+          handshakeRecoveryTimer = setInterval(() => {
+            if (secure.isHandshakeComplete() || !raw.isConnected()) {
+              clearHandshakeRecovery();
+              return;
+            }
+            console.log(`[P2P DEBUG][${connKey}] Handshake still pending. Retrying secure handshake...`);
+            secure.establishHandshake(true).catch((err) => {
+              console.warn(`[P2P DEBUG][${connKey}] Handshake retry failed:`, err);
+            });
+          }, 2000);
+        };
  
         secure.receive(async (plaintext) => {
           console.log(`[P2P Connection][${connKey}] Encrypted payload successfully decrypted:`, plaintext);
@@ -275,6 +296,7 @@ export function useInitializeServices() {
         });
  
         secure.onHandshakeReady(async () => {
+          clearHandshakeRecovery();
           const remoteId = secure.getRemoteDeviceId();
           const remoteKey = secure.getRemotePublicKey();
           const remoteName = secure.getRemoteDisplayName();
@@ -323,6 +345,7 @@ export function useInitializeServices() {
         });
  
         raw.onDisconnect(() => {
+          clearHandshakeRecovery();
           const remoteId = entry.deviceId ?? secure.getRemoteDeviceId();
           if (remoteId) {
             console.log(`[P2P DEBUG][${connKey}] TCP socket disconnected. Unregistering transport for: ${remoteId}`);
@@ -445,6 +468,7 @@ export function useInitializeServices() {
                 const secure = new SecureTransport(raw, privateKey, publicKey, deviceId, displayName);
                 const connKey = `owner-socket-${Date.now()}`;
                 const ownerEntry = setupPeerConnection(connKey, raw, secure, deviceId);
+                scheduleHandshakeRecovery();
                 // Store the MAC of the client that just connected (captured by lastTargetMacAddress
                 // on the other side). On the server side we don't know the client MAC until the
                 // handshake completes, so we store nothing here â€” that's fine; the connKey is
@@ -507,6 +531,7 @@ export function useInitializeServices() {
               const raw = new AndroidWifiP2PTransport(deviceId);
               const secure = new SecureTransport(raw, privateKey, publicKey, deviceId, displayName);
               const clientEntry = setupPeerConnection(finalKey, raw, secure, deviceId);
+              scheduleHandshakeRecovery();
               // Populate the MAC address for proper disconnect-key cleanup
               if (lastTargetMacAddress) {
                 clientEntry.deviceAddress = lastTargetMacAddress;

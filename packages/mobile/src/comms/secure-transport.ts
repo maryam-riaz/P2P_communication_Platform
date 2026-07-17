@@ -47,6 +47,8 @@ export class SecureTransport {
   private handshakeCallbacks: (() => void)[] = [];
   private rxBuffer = '';
   private lastHandshakeSentTime = 0;
+  private handshakeRetryTimer: ReturnType<typeof setTimeout> | null = null;
+  private handshakeAttempts = 0;
 
   constructor(
     private rawTransport: PeerTransport,
@@ -62,17 +64,51 @@ export class SecureTransport {
   /**
    * Performs the initial cryptographic key exchange handshake.
    * Sends the local public key unencrypted over the active P2P connection.
+   * A forced reply is allowed when we just received a remote exchange so the
+   * peer can complete the handshake even if the cooldown would otherwise block it.
    */
-  async establishHandshake(): Promise<void> {
+  async establishHandshake(force = false): Promise<void> {
+    if (this.handshakeCompleted) {
+      return;
+    }
+
     const now = Date.now();
-    if (now - this.lastHandshakeSentTime < 3000) {
+    if (!force && now - this.lastHandshakeSentTime < 3000) {
       console.log('[Secure Transport] Handshake request rate-limited (cooldown active).');
       return;
     }
+
     this.lastHandshakeSentTime = now;
-    console.log('[Secure Transport] Initiating unencrypted P2P public key exchange...');
+    this.handshakeAttempts += 1;
+    console.log(`[Secure Transport] Initiating unencrypted P2P public key exchange (attempt ${this.handshakeAttempts})...`);
     const keyMsg = `PUBKEY_EXCHANGE:${this.localPublicKeyHex}:${this.localDeviceId}:${this.localDisplayName}\n`;
     await this.rawTransport.send(strToBytes(keyMsg));
+
+    if (!this.handshakeCompleted) {
+      this.scheduleHandshakeRetry();
+    }
+  }
+
+  private scheduleHandshakeRetry(): void {
+    if (this.handshakeCompleted || this.handshakeRetryTimer) {
+      return;
+    }
+
+    this.handshakeRetryTimer = setTimeout(() => {
+      this.handshakeRetryTimer = null;
+      if (!this.handshakeCompleted) {
+        this.establishHandshake(true).catch((err) => {
+          console.warn('[Secure Transport] Handshake retry failed:', err);
+        });
+      }
+    }, 1000);
+  }
+
+  private clearHandshakeRetryTimer(): void {
+    if (this.handshakeRetryTimer) {
+      clearTimeout(this.handshakeRetryTimer);
+      this.handshakeRetryTimer = null;
+    }
   }
 
   /**
@@ -156,15 +192,24 @@ export class SecureTransport {
   private processPacket(rawStr: string): void {
     // Case 1: Handshake identity exchange (unencrypted)
     if (rawStr.startsWith('PUBKEY_EXCHANGE:')) {
-      const parts = rawStr.split(':');
-      this.remotePublicKeyHex = parts[1]?.trim() || null;
-      this.remoteDeviceId = parts[2]?.trim() || null;
-      this.remoteDisplayName = parts[3]?.trim() || null;
+      const match = rawStr.match(/^PUBKEY_EXCHANGE:([^:]+):([^:]+):(.*)$/);
+      if (match) {
+        this.remotePublicKeyHex = match[1]?.trim() || null;
+        this.remoteDeviceId = match[2]?.trim() || null;
+        this.remoteDisplayName = match[3]?.trim() || null;
+      } else {
+        const parts = rawStr.split(':');
+        this.remotePublicKeyHex = parts[1]?.trim() || null;
+        this.remoteDeviceId = parts[2]?.trim() || null;
+        this.remoteDisplayName = parts[3]?.trim() || null;
+      }
       this.handshakeCompleted = true;
+      this.clearHandshakeRetryTimer();
       console.log(`[Secure Transport] Handshake complete! Received remote ID: ${this.remoteDeviceId}, display name: ${this.remoteDisplayName}`);
 
-      // Respond by triggering our own handshake key exchange (will be rate-limited by 3s cooldown if we just sent one)
-      this.establishHandshake().catch((err) => {
+      // Respond by triggering our own handshake key exchange. This must not be blocked by the
+      // cooldown because the other side needs to see the reply to complete its own handshake state.
+      this.establishHandshake(true).catch((err) => {
         console.warn('[Secure Transport] Failed replying to public key exchange:', err);
       });
 
@@ -242,6 +287,7 @@ export class SecureTransport {
   }
 
   async disconnect(): Promise<void> {
+    this.clearHandshakeRetryTimer();
     this.handshakeCompleted = false;
     this.remotePublicKeyHex = null;
     this.remoteDeviceId = null;

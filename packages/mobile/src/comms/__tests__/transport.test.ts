@@ -13,6 +13,69 @@ describe('P2P Comms Transport Layer End-to-End Tests', () => {
     if (rawTransportB) await rawTransportB.disconnect();
   });
 
+  it('should complete the handshake when one side receives the other side\'s public-key exchange', async () => {
+    const keysA = generateKeyPair();
+    const keysB = generateKeyPair();
+    const deviceIdA = '11111111-2222-3333-4444-555555555555';
+    const deviceIdB = '66666666-7777-8888-9999-000000000000';
+
+    rawTransportA = new AndroidWifiP2PTransport(deviceIdA);
+    rawTransportB = new AndroidWifiP2PTransport(deviceIdB);
+
+    const secureA = new SecureTransport(rawTransportA, keysA.privateKey, keysA.publicKey, deviceIdA, 'Alice');
+    const secureB = new SecureTransport(rawTransportB, keysB.privateKey, keysB.publicKey, deviceIdB, 'Bob');
+
+    const PORT = 28889;
+    await rawTransportA.openServerSocket(PORT);
+    await rawTransportB.connectToSocket('127.0.0.1', PORT);
+    rawTransportA.setRemotePeerId(deviceIdB);
+    rawTransportB.setRemotePeerId(deviceIdA);
+
+    let handshakeReadyA = 0;
+    let handshakeReadyB = 0;
+    secureA.onHandshakeReady(() => {
+      handshakeReadyA += 1;
+    });
+    secureB.onHandshakeReady(() => {
+      handshakeReadyB += 1;
+    });
+
+    const receivedByA: string[] = [];
+    const receivedByB: string[] = [];
+    secureA.receive((message) => receivedByA.push(message));
+    secureB.receive((message) => receivedByB.push(message));
+
+    const originalSendA = rawTransportA.send.bind(rawTransportA);
+    const originalSendB = rawTransportB.send.bind(rawTransportB);
+    rawTransportA.send = async (data) => {
+      const str = Buffer.from(data).toString('utf-8');
+      if (str.startsWith('PUBKEY_EXCHANGE:')) {
+        return originalSendB(data);
+      }
+      return originalSendA(data);
+    };
+    rawTransportB.send = async (data) => {
+      const str = Buffer.from(data).toString('utf-8');
+      if (str.startsWith('PUBKEY_EXCHANGE:')) {
+        return originalSendA(data);
+      }
+      return originalSendB(data);
+    };
+
+    await secureA.establishHandshake(true);
+    await secureB.establishHandshake(true);
+
+    await new Promise((resolve) => setTimeout(resolve, 200));
+
+    expect(secureA.isHandshakeComplete()).toBe(true);
+    expect(secureB.isHandshakeComplete()).toBe(true);
+
+    rawTransportA.send = originalSendA as any;
+    rawTransportB.send = originalSendB as any;
+    await rawTransportA.disconnect();
+    await rawTransportB.disconnect();
+  });
+
   it('should advertise, discover, connect, and exchange encrypted messages successfully', async () => {
     // 1. Setup Device A (Server/Advertiser)
     const keysA = generateKeyPair();
