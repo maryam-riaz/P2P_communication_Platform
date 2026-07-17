@@ -1,6 +1,7 @@
 import { Database, Q } from '@nozbe/watermelondb';
 import uuid from 'react-native-uuid';
 import { sha256 } from 'js-sha256';
+import { NativeModules } from 'react-native';
 import { MobileRepository } from '../db/repository';
 import { Message, LocalUser, KnownPeer } from '../db/models';
 import { SecureTransport } from '../comms/secure-transport';
@@ -25,6 +26,18 @@ export class ChatService {
   private heartbeatIntervalId: any = null;
   private secureTransportsList: SecureTransport[] = [];
   private transportHandshakeStartMap = new Map<SecureTransport, number>();
+
+  private incomingFileTransfers = new Map<string, {
+    metadata: {
+      senderId: string;
+      recipientId: string;
+      fileName: string;
+      fileType: 'image' | 'video' | 'audio';
+      totalChunks: number;
+      timestamp: number;
+    };
+    chunks: string[];
+  }>();
 
   constructor(private db: Database) {
     this.repository = new MobileRepository(db);
@@ -307,10 +320,28 @@ export class ChatService {
       createdAt: timestamp
     });
 
-    // 2. Attempt transmission if peer is active
+    // 2. Perform transmission asynchronously in the background.
+    // Do not await this to allow immediate render of the message on the local chat screen.
+    this.transmitMessageInBackground(message, text, recipientId, attachment).catch(err => {
+      console.warn('[ChatService] Background transmission failed:', err);
+    });
+
+    return message;
+  }
+
+  /**
+   * Transmits a message in the background. If the message has an attachment,
+   * it sends it in chunks to avoid blocking the single-threaded JS execution loop.
+   */
+  private async transmitMessageInBackground(
+    message: Message,
+    text: string,
+    recipientId: string,
+    attachment?: { uri: string; type: 'image' | 'video' | 'audio'; name: string }
+  ): Promise<void> {
     let secureTransport = this.getOutboundTransport(recipientId);
-    
-    // Self-healing: if no active registered transport, check if we have a connected transport that just needs a handshake
+
+    // Self-healing: check for unhandshaked connection
     if (!secureTransport) {
       const unhandshakedConn = this.secureTransportsList.find(t => t.isConnected() && !t.isHandshakeComplete());
       if (unhandshakedConn) {
@@ -321,17 +352,67 @@ export class ChatService {
       }
     }
 
-    if (secureTransport && secureTransport.isHandshakeComplete()) {
+    if (secureTransport && secureTransport.isConnected() && secureTransport.isHandshakeComplete()) {
       try {
-        const payload = {
-          id: messageId,
-          senderId: myDeviceId,
-          recipientId,
-          text: messageBody,
-          timestamp, // send as numeric ms since epoch — receiver uses same value for hash
-          type: 'chat'
-        };
-        await secureTransport.send(JSON.stringify(payload));
+        const localUser = await this.repository.getLocalUser();
+        const myDeviceId = localUser ? (localUser._raw as any).device_id : 'unknown';
+
+        if (attachment) {
+          // Send file chunked
+          const base64Data = await NativeModules.WifiDirect.readFileAsBase64(attachment.uri);
+          const chunkSize = 40000; // 40KB per chunk
+          const totalChunks = Math.ceil(base64Data.length / chunkSize);
+          const timestamp = message.createdAt;
+
+          // 1. Send chat_file_start
+          await secureTransport.send(JSON.stringify({
+            type: 'chat_file_start',
+            messageId: message.id,
+            senderId: myDeviceId,
+            recipientId,
+            fileName: attachment.name,
+            fileType: attachment.type,
+            totalChunks,
+            timestamp
+          }));
+
+          // Yield to event loop
+          await new Promise(r => setTimeout(r, 20));
+
+          // 2. Send all chunks
+          for (let i = 0; i < totalChunks; i++) {
+            const chunkData = base64Data.substring(i * chunkSize, (i + 1) * chunkSize);
+            await secureTransport.send(JSON.stringify({
+              type: 'chat_file_chunk',
+              messageId: message.id,
+              senderId: myDeviceId,
+              recipientId,
+              chunkIndex: i,
+              chunkData
+            }));
+            // Yield to event loop between chunks to keep the JS thread responsive
+            await new Promise(r => setTimeout(r, 10));
+          }
+
+          // 3. Send chat_file_end
+          await secureTransport.send(JSON.stringify({
+            type: 'chat_file_end',
+            messageId: message.id,
+            senderId: myDeviceId,
+            recipientId
+          }));
+        } else {
+          // Send regular text message
+          const payload = {
+            id: message.id,
+            senderId: myDeviceId,
+            recipientId,
+            text,
+            timestamp: message.createdAt,
+            type: 'chat'
+          };
+          await secureTransport.send(JSON.stringify(payload));
+        }
 
         // Update database status to 'sent'
         await this.db.write(async () => {
@@ -343,10 +424,54 @@ export class ChatService {
         console.warn(`Failed transmission to ${recipientId}, message remains pending.`, error);
       }
     } else {
-      console.log(`Peer ${recipientId} offline. Message stored in outbox queue.`);
+      console.log(`Peer ${recipientId} offline or not handshaked. Message stored in outbox queue.`);
     }
+  }
 
-    return message;
+  /**
+   * Processes chunked file transfer payloads from a remote peer.
+   */
+  async handleIncomingFilePayload(payload: any): Promise<void> {
+    const { type, messageId } = payload;
+    if (type === 'chat_file_start') {
+      const { senderId, recipientId, fileName, fileType, totalChunks, timestamp } = payload;
+      this.incomingFileTransfers.set(messageId, {
+        metadata: { senderId, recipientId, fileName, fileType, totalChunks, timestamp },
+        chunks: new Array(totalChunks)
+      });
+      console.log(`[ChatService] Started receiving chunked file: ${fileName}, total chunks: ${totalChunks}`);
+    } else if (type === 'chat_file_chunk') {
+      const { chunkIndex, chunkData } = payload;
+      const transfer = this.incomingFileTransfers.get(messageId);
+      if (transfer) {
+        transfer.chunks[chunkIndex] = chunkData;
+      }
+    } else if (type === 'chat_file_end') {
+      const transfer = this.incomingFileTransfers.get(messageId);
+      if (transfer) {
+        console.log(`[ChatService] Completed receiving chunked file: ${transfer.metadata.fileName}`);
+        const base64Data = transfer.chunks.join('');
+        this.incomingFileTransfers.delete(messageId);
+
+        // Write the base64 string to a local cache file natively
+        const localUri = await NativeModules.WifiDirect.writeBase64ToFile(base64Data, transfer.metadata.fileName);
+
+        // Reconstruct incoming message payload
+        const chatPayload = {
+          id: messageId,
+          senderId: transfer.metadata.senderId,
+          recipientId: transfer.metadata.recipientId,
+          text: '',
+          attachmentMeta: {
+            uri: localUri,
+            type: transfer.metadata.fileType,
+            name: transfer.metadata.fileName
+          },
+          timestamp: transfer.metadata.timestamp
+        };
+        await this.handleIncomingMessage(chatPayload);
+      }
+    }
   }
 
   /**
@@ -371,12 +496,18 @@ export class ChatService {
       return;
     }
 
+    // If payload contains attachment metadata, reconstruct the JSON ciphertext
+    // so the local receiver's toDisplayMessage can parse and display it.
+    const ciphertextBody = payload.attachmentMeta
+      ? JSON.stringify({ text: payload.text, attachment: payload.attachmentMeta })
+      : payload.text;
+
     // Write message to DB
     const saved = await this.repository.addNewMessage({
       id,
       senderId,
       recipientId: recipientId || '',
-      ciphertext: text,
+      ciphertext: ciphertextBody,
       signature: '',
       contentHash,
       hopCount: 1,
@@ -469,23 +600,21 @@ export class ChatService {
     for (const msg of pending) {
       const rawMsg = msg._raw as any;
       try {
-        const payload = {
-          id: msg.id,
-          senderId: rawMsg.sender_id,
-          recipientId: peerId,
-          text: rawMsg.ciphertext,
-          timestamp: new Date(rawMsg.created_at).toISOString(),
-          type: 'chat'
-        };
-        await secureTransport.send(JSON.stringify(payload));
+        let text = rawMsg.ciphertext || '';
+        let attachment: any = undefined;
+        if (text.startsWith('{') && text.endsWith('}')) {
+          try {
+            const parsed = JSON.parse(text);
+            text = parsed.text || '';
+            attachment = parsed.attachment;
+          } catch (e) {}
+        }
         
-        await this.db.write(async () => {
-          await msg.update(record => {
-            record.localSyncStatus = 'sent';
-          });
+        this.transmitMessageInBackground(msg, text, peerId, attachment).catch(err => {
+          console.warn(`Retry failed for message ${msg.id}`, err);
         });
       } catch (err) {
-        console.warn(`Retry failed for message ${msg.id}`, err);
+        console.warn(`Retry parsing failed for message ${msg.id}`, err);
       }
     }
   }

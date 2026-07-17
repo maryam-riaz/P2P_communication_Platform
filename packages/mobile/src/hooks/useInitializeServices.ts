@@ -45,6 +45,7 @@ interface PeerConnection {
   raw: AndroidWifiP2PTransport;
   secure: SecureTransport;
   deviceId?: string;
+  deviceAddress?: string; // MAC address of the remote peer (set when connectToPeer is called)
 }
  
 export function useInitializeServices() {
@@ -102,7 +103,7 @@ export function useInitializeServices() {
       let unsubConnectionInfo: (() => void) | null = null;
       let unsubPeersChanged: (() => void) | null = null;
  
-      // ── Multi-peer connection pools ──────────────────────────────────────
+      // â”€â”€ Multi-peer connection pools â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
       // Every connected/connecting peer gets its own PeerConnection, keyed by
       // Wi-Fi Direct MAC address first, then mirrored by deviceId once the
       // handshake reveals it. This replaces the old single
@@ -114,11 +115,26 @@ export function useInitializeServices() {
       const connectingKeys = new Set<string>();
  
       // A device can only be a *client* of one Wi-Fi Direct group at a time
-      // (an OS-level constraint, not a bug) — but if it's the *group owner*,
+      // (an OS-level constraint, not a bug) â€” but if it's the *group owner*,
       // more devices can still join that same group. Track which role we're
       // in so we know whether it's even valid to attempt another connection.
       let groupRole: 'unassigned' | 'owner' | 'client' = 'unassigned';
       let serverSocketBound = false;
+      // Tracks the MAC of the peer we most recently called connectToPeer() for.
+      // Used to populate entry.deviceAddress before the handshake reveals the logical deviceId.
+      let lastTargetMacAddress: string | null = null;
+      // â”€â”€ BLE-first peer ID resolution â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+      // Maps display name (lower-cased) â†’ live BLE-discovered deviceId.
+      // This is the authoritative source for the initiator check in onPeersChanged.
+      // It is always more up-to-date than known_peers (which can hold stale IDs
+      // from previous installs / account resets â€” the root cause of the initiator
+      // deadlock where both devices computed isInitiator=false).
+      const bleDiscoveredIds = new Map<string, string>();
+      // Periodic discovery retry â€” re-triggers discoverPeers() if we know about
+      // BLE peers but no Wi-Fi Direct group has formed yet. Handles the case
+      // where onPeersChanged never fires because the two devices weren't in the
+      // same discovery window simultaneously.
+      let discoveryRetryTimer: ReturnType<typeof setInterval> | null = null;
  
       /**
        * Wires up a raw transport + its SecureTransport wrapper with all the
@@ -128,6 +144,7 @@ export function useInitializeServices() {
        */
       const performP2PCleanup = async (context: string) => {
         console.log(`[P2P Cleanup - ${context}] Starting robust P2P cleanup sequence...`);
+        connectingKeys.clear();
         try {
           await AndroidWifiP2PTransport.cancelConnect();
         } catch (e) {
@@ -176,14 +193,14 @@ export function useInitializeServices() {
               chatService.updateTransportActivity(remoteId);
             }
  
-            // ── Hub Relay Logic ──
+            // â”€â”€ Hub Relay Logic â”€â”€
             // If the message is a chat or ack directed at another device, or is a broadcast type (location_share, sos),
             // and we are the group owner (so we have other active transports), we act as a relay hub.
             let isForMe = true;
             let relayToId: string | null = null;
             let isBroadcast = false;
 
-            if (payload.type === 'chat') {
+            if (payload.type === 'chat' || payload.type === 'chat_file_start' || payload.type === 'chat_file_chunk' || payload.type === 'chat_file_end') {
               isForMe = payload.recipientId === localDeviceId;
               if (!isForMe) {
                 relayToId = payload.recipientId;
@@ -228,6 +245,8 @@ export function useInitializeServices() {
             if (payload.type === 'chat') {
               console.log('[P2P Connection] Received chat message payload:', payload);
               await chatService.handleIncomingMessage(payload);
+            } else if (payload.type === 'chat_file_start' || payload.type === 'chat_file_chunk' || payload.type === 'chat_file_end') {
+              await chatService.handleIncomingFilePayload(payload);
             } else if (payload.type === 'location_share') {
               const peersRepo = new MobileRepository(db);
               await peersRepo.updatePeerLocation(payload.senderId, payload.lat, payload.lng);
@@ -311,21 +330,33 @@ export function useInitializeServices() {
           }
           chatService.unregisterSecureTransport(secure);
           connectionsByKey.delete(connKey);
+          // Also delete by MAC address in case the connKey is the GO synthetic key
+          if (entry.deviceAddress) {
+            connectionsByKey.delete(entry.deviceAddress);
+            connectingKeys.delete(entry.deviceAddress);
+          }
           connectingKeys.delete(connKey);
- 
+
           if (connectionsByKey.size === 0) {
             connectingKeys.clear();
-          }
- 
-          // Only the client role is exclusive to one group; losing our one
-          // client connection frees us up to look for (or accept) another.
-          // Losing one of several inbound connections as group owner should
-          // NOT reset serverSocketBound — the socket itself is still open
-          // for other/future clients.
-          if (groupRole === 'client') {
+            // â”€â”€ Critical Reset â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+            // When ALL connections are gone we must fully reset the Wi-Fi Direct
+            // group state. Without this reset the group owner never re-opens its
+            // server socket (serverSocketBound stays true) and subsequent
+            // connection attempts fail silently â€” this was the root cause of the
+            // handshake not completing after an initial disconnect.
+            serverSocketBound = false;
+            groupRole = 'unassigned';
+            console.log('[P2P DEBUG] All connections gone. Resetting group state and triggering P2P cleanup...');
+            performP2PCleanup('All Clients Disconnected').catch((err) =>
+              console.warn('[P2P DEBUG] performP2PCleanup after full disconnect failed:', err)
+            );
+          } else if (groupRole === 'client') {
+            // Only the client role is exclusive to one group; losing our one
+            // client connection frees us up to look for (or accept) another.
             groupRole = 'unassigned';
           }
- 
+
           console.log(`[P2P DEBUG][${connKey}] Disconnected. Triggering re-discovery...`);
           AndroidWifiP2PTransport.discoverPeers().catch((err) =>
             console.warn('[P2P DEBUG] Re-discovery after disconnect failed:', err)
@@ -387,7 +418,7 @@ export function useInitializeServices() {
           console.warn('[P2P Bootstrap] Failed to start BLE advertising (check if Bluetooth is enabled):', err);
         }
  
-        // ── Wire up Wi-Fi Direct Group formation listeners ──
+        // â”€â”€ Wire up Wi-Fi Direct Group formation listeners â”€â”€
         unsubConnectionInfo = AndroidWifiP2PTransport.onConnectionInfo(async (info) => {
           console.log('[P2P DEBUG] Connection Info Event received:', info);
           if (info.groupFormed) {
@@ -402,7 +433,7 @@ export function useInitializeServices() {
                 // per-connection ID. Re-opening here is skipped to avoid
                 // clobbering an existing connection, but a genuinely concurrent
                 // 3rd/4th client requires the native module to accept() in a
-                // loop and tag events with a connection id — that change has
+                // loop and tag events with a connection id â€” that change has
                 // to happen in the (currently missing from this repo) Kotlin
                 // WifiDirect module.
                 console.log('[P2P DEBUG] Server socket already bound. Skipping duplicate openServerSocket.');
@@ -413,7 +444,12 @@ export function useInitializeServices() {
                 const raw = new AndroidWifiP2PTransport(deviceId);
                 const secure = new SecureTransport(raw, privateKey, publicKey, deviceId, displayName);
                 const connKey = `owner-socket-${Date.now()}`;
-                setupPeerConnection(connKey, raw, secure, deviceId);
+                const ownerEntry = setupPeerConnection(connKey, raw, secure, deviceId);
+                // Store the MAC of the client that just connected (captured by lastTargetMacAddress
+                // on the other side). On the server side we don't know the client MAC until the
+                // handshake completes, so we store nothing here â€” that's fine; the connKey is
+                // unique enough for the owner's inbound socket lifetime.
+                void ownerEntry;
  
                 raw.onConnect(async () => {
                   console.log(`[P2P DEBUG][${connKey}] TCP Server received client connection. Initiating handshake...`);
@@ -470,7 +506,11 @@ export function useInitializeServices() {
  
               const raw = new AndroidWifiP2PTransport(deviceId);
               const secure = new SecureTransport(raw, privateKey, publicKey, deviceId, displayName);
-              setupPeerConnection(finalKey, raw, secure, deviceId);
+              const clientEntry = setupPeerConnection(finalKey, raw, secure, deviceId);
+              // Populate the MAC address for proper disconnect-key cleanup
+              if (lastTargetMacAddress) {
+                clientEntry.deviceAddress = lastTargetMacAddress;
+              }
  
               // Retry with exponential backoff: 2s, 4s, 8s, 16s, 32s
               let delay = 2000;
@@ -501,6 +541,7 @@ export function useInitializeServices() {
             console.log('[P2P DEBUG] Group is not formed (info.groupFormed is false). Resetting connection flags.');
             serverSocketBound = false;
             groupRole = 'unassigned';
+            connectingKeys.clear();
           }
         });
  
@@ -508,7 +549,7 @@ export function useInitializeServices() {
           console.log('[P2P DEBUG] Wi-Fi Direct peers changed. Peers count:', peers.length, 'Peers:', peers);
  
           // A device already committed as a CLIENT of another group cannot
-          // also connect out to a second peer — that's a real Wi-Fi Direct
+          // also connect out to a second peer â€” that's a real Wi-Fi Direct
           // constraint. But being the GROUP OWNER (or unassigned) should NOT
           // stop us from inviting additional available peers in.
           if (groupRole === 'client') {
@@ -533,7 +574,7 @@ export function useInitializeServices() {
           };
  
           // Find peers that are AVAILABLE (status 3) and not already
-          // connected or mid-connection — this is now checked PER PEER
+          // connected or mid-connection â€” this is now checked PER PEER
           // instead of via a single global "is anyone connected" flag, so
           // discovering a 3rd/4th device no longer gets silently dropped
           // just because we already have one active connection.
@@ -551,38 +592,44 @@ export function useInitializeServices() {
             return;
           }
 
-          // To prevent simultaneous connectToPeer conflicts, we look up candidates
-          // in our KnownPeers database and check if we are the initiator (our deviceId < their deviceId).
+          // Initiator check: BLE-first resolution
+          // Priority:
+          //   1. live bleDiscoveredIds map  (never stale)
+          //   2. MAC-address lexicographic fallback
+          // known_peers DB is NOT used here: stale device_ids cause isInitiator=false deadlock.
           let candidateToConnect: typeof candidates[0] | null = null;
-          try {
-            const knownPeers = await db.get<KnownPeer>('known_peers').query().fetch();
-            for (const c of candidates) {
-              const matched = knownPeers.find((kp) => {
-                const kpName = (kp._raw as any).display_name;
-                return kpName && c.deviceName.toLowerCase().includes(kpName.toLowerCase());
-              });
 
-              if (matched) {
-                const remoteId = (matched._raw as any).device_id;
-                const isInitiator = deviceId < remoteId;
-                console.log(`[P2P DEBUG] Candidate peer ${c.deviceName} mapped to device ID ${remoteId.substring(0, 8)}. isInitiator = ${isInitiator}`);
-                if (isInitiator) {
-                  candidateToConnect = c;
-                  break;
-                }
-              } else {
-                // Deterministic fallback if not yet in known_peers
-                const isInitiatorFallback = deviceId.toLowerCase() < c.deviceAddress.toLowerCase();
-                console.log(`[P2P DEBUG] Candidate peer ${c.deviceName} NOT found in DB. Fallback comparison: isInitiator = ${isInitiatorFallback}`);
-                if (isInitiatorFallback) {
-                  candidateToConnect = c;
-                  break;
-                }
+          for (const c of candidates) {
+            // 1. Live BLE map - most reliable
+            const sanitizedCandidateName = c.deviceName.replace(/[^a-zA-Z0-9 ]/g, '').toLowerCase();
+            const bleRemoteId = bleDiscoveredIds.get(sanitizedCandidateName);
+            if (bleRemoteId) {
+              const isInitiator = deviceId < bleRemoteId;
+              console.log(`[P2P DEBUG] Candidate ${c.deviceName} resolved via BLE map => ${bleRemoteId.substring(0, 8)}. isInitiator = ${isInitiator}`);
+              if (isInitiator) {
+                candidateToConnect = c;
+                break;
               }
+              // Not the initiator for this peer - continue
+              continue;
             }
-          } catch (dbErr) {
-            console.warn('[P2P DEBUG] Failed querying known peers, falling back to first candidate:', dbErr);
-            candidateToConnect = candidates[0];
+
+            // 2. Symmetric display-name-based fallback (no BLE data yet)
+            const localName = displayName.replace(/[^a-zA-Z0-9 ]/g, '').toLowerCase();
+            const remoteName = sanitizedCandidateName;
+            let isInitiatorFallback = false;
+            if (localName !== remoteName) {
+              isInitiatorFallback = localName < remoteName;
+            } else {
+              // If display names are identical, fall back to MAC address / UUID comparison
+              const localMac = AndroidWifiP2PTransport.localMacAddress?.toLowerCase() || deviceId.toLowerCase();
+              isInitiatorFallback = localMac < c.deviceAddress.toLowerCase();
+            }
+            console.log(`[P2P DEBUG] Candidate ${c.deviceName} NOT in BLE map. Name fallback: local=${localName} remote=${remoteName} isInitiator = ${isInitiatorFallback}`);
+            if (isInitiatorFallback) {
+              candidateToConnect = c;
+              break;
+            }
           }
 
           if (!candidateToConnect) {
@@ -591,6 +638,8 @@ export function useInitializeServices() {
           }
 
           connectingKeys.add(candidateToConnect.deviceAddress);
+          // Remember the MAC so setupPeerConnection can populate entry.deviceAddress
+          lastTargetMacAddress = candidateToConnect.deviceAddress;
           console.log('[P2P DEBUG] Selected target peer for Wi-Fi Direct connection:', candidateToConnect.deviceName, candidateToConnect.deviceAddress);
           try {
             await AndroidWifiP2PTransport.connectToPeer(candidateToConnect.deviceAddress);
@@ -646,9 +695,17 @@ export function useInitializeServices() {
  
           mapService.updatePeerRssi(peerDevice.deviceId, peerDevice.rssi);
  
+          // â”€â”€ Update live BLE-first resolution map â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+          // Store / overwrite the mapping every scan so we always have the
+          // freshest device_id for each display name, regardless of what the
+          // known_peers DB says. This is what onPeersChanged reads first.
+          if (peerDevice.displayName) {
+            bleDiscoveredIds.set(peerDevice.displayName.toLowerCase(), peerDevice.deviceId);
+          }
+
           // Same fix as onPeersChanged: only skip discovery for a peer we're
           // already connected/connecting to (or if we're locked as a client
-          // elsewhere) — not just because *some* connection exists.
+          // elsewhere) â€” not just because *some* connection exists.
           const alreadyConnected = connectionsByKey.has(peerDevice.deviceId) ||
             Array.from(connectionsByKey.values()).some((c) => c.deviceId === peerDevice.deviceId);
  
@@ -669,6 +726,25 @@ export function useInitializeServices() {
           }
         });
  
+        // â”€â”€ Periodic discovery retry timer â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+        // If onPeersChanged never fires (devices not in same discovery window),
+        // re-trigger discoverPeers every 30s while we're unassigned and have
+        // at least one BLE-discovered peer we haven't connected to yet.
+        if (discoveryRetryTimer) clearInterval(discoveryRetryTimer);
+        discoveryRetryTimer = setInterval(async () => {
+          if (groupRole !== 'unassigned' || bleDiscoveredIds.size === 0) return;
+          const hasUnconnectedBlePeer = Array.from(bleDiscoveredIds.values()).some(
+            (id) => !Array.from(connectionsByKey.values()).some((conn) => conn.deviceId === id)
+          );
+          if (!hasUnconnectedBlePeer) return;
+          console.log('[P2P DEBUG] Retry timer: still unassigned with known BLE peers. Re-triggering discoverPeers...');
+          try {
+            await AndroidWifiP2PTransport.discoverPeers();
+          } catch (err) {
+            console.warn('[P2P DEBUG] Retry discoverPeers failed:', err);
+          }
+        }, 30000);
+ 
         try {
           currentScanner.startScanning();
         } catch (err) {
@@ -681,6 +757,10 @@ export function useInitializeServices() {
        */
       const shutdownTransports = async () => {
         console.log('[P2P Bootstrap] Shutting down transport protocols.');
+        if (discoveryRetryTimer) {
+          clearInterval(discoveryRetryTimer);
+          discoveryRetryTimer = null;
+        }
         if (unsubConnectionInfo) {
           unsubConnectionInfo();
           unsubConnectionInfo = null;

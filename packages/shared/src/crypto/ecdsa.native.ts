@@ -1,5 +1,5 @@
-import { p256 } from '@noble/curves/nist';
-import { sha256 } from '@noble/hashes/sha2';
+import { p256 } from '@noble/curves/nist.js';
+import { sha256 } from '@noble/hashes/sha2.js';
 
 /** Converts a hex string to Uint8Array without using Buffer */
 function hexToBytes(hex: string): Uint8Array {
@@ -41,8 +41,12 @@ export function verify(message: Uint8Array, signature: Uint8Array, publicKeyHex:
     // Hash the message with SHA-256
     const msgHash = sha256(message);
 
+    // Parse DER signature to compact signature format
+    const parsedSig = p256.Signature.fromBytes(signature, 'der');
+    const compactSig = parsedSig.toBytes();
+
     // Verify using p256
-    return p256.verify(signature, msgHash, publicKeyBytes);
+    return p256.verify(compactSig, msgHash, publicKeyBytes);
   } catch (error) {
     // If the public key is malformed or verification throws, return false
     return false;

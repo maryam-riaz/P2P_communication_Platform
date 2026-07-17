@@ -95,11 +95,27 @@ export class SecureTransport {
 
   /**
    * Encrypts, signs, and sends a plaintext message to the remote peer.
+   * Uses AES-256-GCM encryption and ECDSA digital signatures (CRYPTO.md).
    * Returns a promise that resolves when the payload is written to the socket.
    */
   async send(plaintext: string): Promise<void> {
-    // BYPASS SECURITY FEATURES: Transmit plaintext directly terminated by a newline
-    const serialized = plaintext + '\n';
+    if (!this.handshakeCompleted || !this.remotePublicKeyHex) {
+      throw new Error('[Secure Transport] Cannot send: handshake not yet complete.');
+    }
+    const packet = encryptAndSign(
+      strToBytes(plaintext),
+      this.localPrivateKeyHex,
+      this.localPublicKeyHex,
+      this.remotePublicKeyHex
+    );
+    const serialized = JSON.stringify({
+      payload:            bytesToBase64(packet.payload),
+      iv:                 bytesToBase64(packet.iv),
+      tag:                bytesToBase64(packet.tag),
+      signature:          bytesToBase64(packet.signature),
+      sender_public_key:  bytesToBase64(packet.sender_public_key),
+      content_hash:       bytesToBase64(packet.content_hash),
+    }) + '\n';
     await this.rawTransport.send(strToBytes(serialized));
   }
 
@@ -147,18 +163,41 @@ export class SecureTransport {
       return;
     }
 
-    // Case 2: Standard unencrypted plaintext message
+    // Case 2: Encrypted JSON packet
     if (!this.handshakeCompleted) {
       console.warn('[Secure Transport] Received data before identity exchange completed. Packet dropped.');
       return;
     }
 
     try {
+      // Deserialise the JSON envelope and convert every base64 field back to Uint8Array
+      const envelope = JSON.parse(rawStr) as {
+        payload: string;
+        iv: string;
+        tag: string;
+        signature: string;
+        sender_public_key: string;
+        content_hash: string;
+      };
+
+      const packet: EncryptedPacket = {
+        payload:           base64ToBytes(envelope.payload),
+        iv:                base64ToBytes(envelope.iv),
+        tag:               base64ToBytes(envelope.tag),
+        signature:         base64ToBytes(envelope.signature),
+        sender_public_key: base64ToBytes(envelope.sender_public_key),
+        content_hash:      base64ToBytes(envelope.content_hash),
+      };
+
+      // Verify ECDSA signature and decrypt with AES-256-GCM
+      const plaintextBytes = verifyAndDecrypt(packet, this.localPrivateKeyHex);
+      const plaintext = bytesToStr(plaintextBytes);
+
       if (this.onMessageCallback) {
-        this.onMessageCallback(rawStr);
+        this.onMessageCallback(plaintext);
       }
     } catch (error) {
-      console.error('[Secure Transport] Error processing incoming unencrypted packet:', error);
+      console.error('[Secure Transport] Error decrypting or verifying digital signature:', error);
     }
   }
 

@@ -1,6 +1,6 @@
-import { p256 } from '@noble/curves/nist';
-import { hkdf } from '@noble/hashes/hkdf';
-import { sha256 } from '@noble/hashes/sha2';
+import { p256 } from '@noble/curves/nist.js';
+import { hkdf } from '@noble/hashes/hkdf.js';
+import { sha256 } from '@noble/hashes/sha2.js';
 
 export interface KeyPair {
   publicKey: string;  // Hex encoded DER SPKI

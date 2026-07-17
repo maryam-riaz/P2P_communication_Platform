@@ -95,13 +95,12 @@ describe('P2P Comms Transport Layer End-to-End Tests', () => {
     const receivedMessage = await messageReceivedPromise;
     expect(receivedMessage).toBe(secretMessage);
 
-    // 8. Secure Tampering Verification (Temporarily bypassed for unencrypted communication mode)
-    /*
-    const originalSend = rawTransportA.send;
+    // 8. Secure Tampering Verification
+    const originalSend = rawTransportA.send.bind(rawTransportA);
     rawTransportA.send = async function (data: Uint8Array): Promise<void> {
       const rawStr = Buffer.from(data).toString('utf-8');
       if (rawStr.startsWith('PUBKEY_EXCHANGE:')) {
-        return originalSend.call(this, data);
+        return originalSend(data);
       }
 
       // Corrupt one byte of ciphertext
@@ -111,7 +110,7 @@ describe('P2P Comms Transport Layer End-to-End Tests', () => {
       parsed.payload = ciphertextBytes.toString('base64');
 
       const corruptedPayload = Buffer.from(JSON.stringify(parsed) + '\n', 'utf-8');
-      return originalSend.call(this, corruptedPayload);
+      return originalSend(corruptedPayload);
     };
 
     let errorLogged = false;
@@ -132,10 +131,9 @@ describe('P2P Comms Transport Layer End-to-End Tests', () => {
     await new Promise((resolve) => setTimeout(resolve, 200));
 
     console.error = originalConsoleError;
-    rawTransportA.send = originalSend; // restore
+    rawTransportA.send = originalSend as any; // restore
 
     expect(errorLogged).toBe(true);
     expect(bReceivedMessage).toBe(false);
-    */
   });
 });

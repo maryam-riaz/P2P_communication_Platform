@@ -1,0 +1,7 @@
+﻿adb : - waiting for device -
+At line:1 char:1
++ adb -s RFCT31QC4DR logcat -d -v time 2>&1 | Out-File -Encoding utf8 " ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (- waiting for device -:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 

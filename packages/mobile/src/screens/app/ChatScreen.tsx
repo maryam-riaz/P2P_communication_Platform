@@ -280,20 +280,10 @@ export default function ChatScreen({ route, navigation }: any) {
 
       setIsSending(true);
 
-      // Read file content as base64 URL
-      const response = await fetch(asset.uri);
-      const blob = await response.blob();
-      const base64DataUrl = await new Promise<string>((resolve, reject) => {
-        const reader = new FileReader();
-        reader.onloadend = () => resolve(reader.result as string);
-        reader.onerror = reject;
-        reader.readAsDataURL(blob);
-      });
-
       await chatService.sendMessage('', recipientId, {
-        uri: base64DataUrl,
+        uri: asset.uri,
         type,
-        name: asset.name,
+        name: asset.name || `doc-${Date.now()}`,
       });
 
     } catch (err) {
@@ -378,21 +368,11 @@ export default function ChatScreen({ route, navigation }: any) {
 
       setIsSending(true);
 
-      // Read file content as base64 URL
-      const response = await fetch(asset.uri);
-      const blob = await response.blob();
-      const base64DataUrl = await new Promise<string>((resolve, reject) => {
-        const reader = new FileReader();
-        reader.onloadend = () => resolve(reader.result as string);
-        reader.onerror = reject;
-        reader.readAsDataURL(blob);
-      });
-
       const extension = type === 'video' ? 'mp4' : 'jpg';
       const name = asset.fileName || `camera-${Date.now()}.${extension}`;
 
       await chatService.sendMessage('', recipientId, {
-        uri: base64DataUrl,
+        uri: asset.uri,
         type,
         name,
       });
@@ -463,19 +443,9 @@ export default function ChatScreen({ route, navigation }: any) {
 
       setIsSending(true);
 
-      // Read audio file base64 data
-      const response = await fetch(uri);
-      const blob = await response.blob();
-      const base64DataUrl = await new Promise<string>((resolve, reject) => {
-        const reader = new FileReader();
-        reader.onloadend = () => resolve(reader.result as string);
-        reader.onerror = reject;
-        reader.readAsDataURL(blob);
-      });
-
       const fileName = `voice-note-${Date.now()}.m4a`;
       await chatService.sendMessage('', recipientId, {
-        uri: base64DataUrl,
+        uri,
         type: 'audio',
         name: fileName,
       });

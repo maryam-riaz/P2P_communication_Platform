@@ -50,6 +50,11 @@ export class AndroidWifiP2PTransport implements PeerTransport {
   private remotePeerId = 'unknown-android-peer';
   private _isServer = false; // true for group owner (server socket side)
 
+  // Stores the local device's own Wi-Fi Direct MAC address.
+  // Populated once the OS fires WifiDirectThisDeviceChanged after initialize().
+  // Used for deterministic initiator-selection (lower MAC = initiator).
+  static localMacAddress: string | null = null;
+
   // Per-instance NativeEventEmitter — gives each transport its own event scope
   private readonly wifiDirectEmitter: InstanceType<typeof NativeEventEmitter> | null;
 
@@ -75,6 +80,18 @@ export class AndroidWifiP2PTransport implements PeerTransport {
       return;
     }
     await WifiDirect.initialize();
+    // Capture this device's own Wi-Fi Direct MAC for deterministic initiator selection
+    if (staticWifiDirectEmitter) {
+      staticWifiDirectEmitter.addListener(
+        'WifiDirectThisDeviceChanged',
+        (event: { deviceAddress: string }) => {
+          if (event?.deviceAddress) {
+            AndroidWifiP2PTransport.localMacAddress = event.deviceAddress;
+            console.log('[Android Wi-Fi Direct] Local MAC address captured:', event.deviceAddress);
+          }
+        }
+      );
+    }
     console.log('[Android Wi-Fi Direct] Native WifiP2pManager initialized.');
   }
 
@@ -321,6 +338,12 @@ export class AndroidWifiP2PTransport implements PeerTransport {
     this.removeNativeListeners();
     if (WifiDirect) {
       await WifiDirect.tcpDisconnect();
+    }
+    // The native WifiDirectTcpDisconnected event fires only for remote-initiated
+    // disconnections. When WE initiate the disconnect we must manually notify
+    // the JS layer so state (serverSocketBound, connectionsByKey, etc.) resets.
+    if (this.disconnectCallback) {
+      this.disconnectCallback();
     }
     console.log('[Android Wi-Fi Direct] TCP transport disconnected.');
   }
