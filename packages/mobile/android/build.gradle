@@ -1,0 +1,44 @@
+// Top-level build file where you can add configuration options common to all sub-projects/modules.
+
+buildscript {
+  repositories {
+    google()
+    mavenCentral()
+  }
+  dependencies {
+    classpath('com.android.tools.build:gradle')
+    classpath('com.facebook.react:react-native-gradle-plugin')
+    classpath('org.jetbrains.kotlin:kotlin-gradle-plugin')
+  }
+}
+
+allprojects {
+  repositories {
+    google()
+    mavenCentral()
+    maven { url 'https://www.jitpack.io' }
+  }
+}
+
+subprojects {
+  afterEvaluate { project ->
+    if (project.hasProperty("android")) {
+      project.android {
+        compileSdkVersion = 36
+        buildToolsVersion = "36.0.0"
+        
+        try {
+          if (externalNativeBuild && externalNativeBuild.cmake) {
+            // Redirect only the staging directory (.cxx) to avoid long path issues with Ninja on Windows
+            externalNativeBuild.cmake.buildStagingDirectory = new File("C:/tmp-ndk/${rootProject.name}/${project.name}")
+          }
+        } catch (Exception e) {
+          // ignore if property doesn't exist
+        }
+      }
+    }
+  }
+}
+
+apply plugin: "expo-root-project"
+apply plugin: "com.facebook.react.rootproject"
