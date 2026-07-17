@@ -509,7 +509,7 @@ export default function ChatScreen({ route, navigation }: any) {
         await Audio.setAudioModeAsync({
           allowsRecordingIOS: false,
           playsInSilentModeIOS: true,
-          shouldRouteAudioToSpeakerIfMounted: true,
+          playThroughEarpieceAndroid: false,
         });
         const { sound } = await Audio.Sound.createAsync(
           { uri: audioUri },

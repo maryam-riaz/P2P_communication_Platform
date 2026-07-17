@@ -46,6 +46,8 @@ interface PeerConnection {
   secure: SecureTransport;
   deviceId?: string;
   deviceAddress?: string; // MAC address of the remote peer (set when connectToPeer is called)
+  scheduleHandshakeRecovery: () => void;
+  clearHandshakeRecovery: () => void;
 }
  
 export function useInitializeServices() {
@@ -179,10 +181,6 @@ export function useInitializeServices() {
         secure: SecureTransport,
         localDeviceId: string
       ): PeerConnection => {
-        const entry: PeerConnection = { connKey, raw, secure };
-        connectionsByKey.set(connKey, entry);
-        chatService.registerSecureTransport(secure);
-
         let handshakeRecoveryTimer: ReturnType<typeof setInterval> | null = null;
         const clearHandshakeRecovery = () => {
           if (handshakeRecoveryTimer) {
@@ -203,6 +201,16 @@ export function useInitializeServices() {
             });
           }, 2000);
         };
+
+        const entry: PeerConnection = {
+          connKey,
+          raw,
+          secure,
+          scheduleHandshakeRecovery,
+          clearHandshakeRecovery,
+        };
+        connectionsByKey.set(connKey, entry);
+        chatService.registerSecureTransport(secure);
  
         secure.receive(async (plaintext) => {
           console.log(`[P2P Connection][${connKey}] Encrypted payload successfully decrypted:`, plaintext);
@@ -468,7 +476,7 @@ export function useInitializeServices() {
                 const secure = new SecureTransport(raw, privateKey, publicKey, deviceId, displayName);
                 const connKey = `owner-socket-${Date.now()}`;
                 const ownerEntry = setupPeerConnection(connKey, raw, secure, deviceId);
-                scheduleHandshakeRecovery();
+                ownerEntry.scheduleHandshakeRecovery();
                 // Store the MAC of the client that just connected (captured by lastTargetMacAddress
                 // on the other side). On the server side we don't know the client MAC until the
                 // handshake completes, so we store nothing here — that's fine; the connKey is
@@ -531,7 +539,7 @@ export function useInitializeServices() {
               const raw = new AndroidWifiP2PTransport(deviceId);
               const secure = new SecureTransport(raw, privateKey, publicKey, deviceId, displayName);
               const clientEntry = setupPeerConnection(finalKey, raw, secure, deviceId);
-              scheduleHandshakeRecovery();
+              clientEntry.scheduleHandshakeRecovery();
               // Populate the MAC address for proper disconnect-key cleanup
               if (lastTargetMacAddress) {
                 clientEntry.deviceAddress = lastTargetMacAddress;
