@@ -49,6 +49,7 @@ export class SecureTransport {
   private lastHandshakeSentTime = 0;
   private handshakeRetryTimer: ReturnType<typeof setTimeout> | null = null;
   private handshakeAttempts = 0;
+  private disposed = false;
 
   constructor(
     private rawTransport: PeerTransport,
@@ -59,6 +60,10 @@ export class SecureTransport {
   ) {
     // Register listeners on the underlying transport
     this.rawTransport.receive((data) => this.handleRawReceivedData(data));
+    this.rawTransport.onDisconnect(() => {
+      this.disposed = true;
+      this.clearHandshakeRetryTimer();
+    });
   }
 
   /**
@@ -68,7 +73,11 @@ export class SecureTransport {
    * peer can complete the handshake even if the cooldown would otherwise block it.
    */
   async establishHandshake(force = false): Promise<void> {
-    if (this.handshakeCompleted) {
+    if (this.disposed) {
+      return;
+    }
+
+    if (!force && this.handshakeCompleted) {
       return;
     }
 
@@ -82,7 +91,14 @@ export class SecureTransport {
     this.handshakeAttempts += 1;
     console.log(`[Secure Transport] Initiating unencrypted P2P public key exchange (attempt ${this.handshakeAttempts})...`);
     const keyMsg = `PUBKEY_EXCHANGE:${this.localPublicKeyHex}:${this.localDeviceId}:${this.localDisplayName}\n`;
-    await this.rawTransport.send(strToBytes(keyMsg));
+
+    try {
+      await this.rawTransport.send(strToBytes(keyMsg));
+    } catch (err) {
+      console.warn('[Secure Transport] Handshake send failed; retrying once the transport is ready:', err);
+      this.scheduleHandshakeRetry();
+      return;
+    }
 
     if (!this.handshakeCompleted) {
       this.scheduleHandshakeRetry();
@@ -90,13 +106,13 @@ export class SecureTransport {
   }
 
   private scheduleHandshakeRetry(): void {
-    if (this.handshakeCompleted || this.handshakeRetryTimer) {
+    if (this.disposed || this.handshakeCompleted || this.handshakeRetryTimer) {
       return;
     }
 
     this.handshakeRetryTimer = setTimeout(() => {
       this.handshakeRetryTimer = null;
-      if (!this.handshakeCompleted) {
+      if (!this.disposed && !this.handshakeCompleted) {
         this.establishHandshake(true).catch((err) => {
           console.warn('[Secure Transport] Handshake retry failed:', err);
         });
