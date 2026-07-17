@@ -103,10 +103,22 @@ export default function ChatScreen({ route, navigation }: any) {
   const [inputText, setInputText] = useState('');
   const [isSending, setIsSending] = useState(false);
   const [isPicking, setIsPicking] = useState(false);
+  const [transferProgress, setTransferProgress] = useState<{ [msgId: string]: number }>({});
   const [localDeviceId, setLocalDeviceId] = useState('');
   const [isPeerActive, setIsPeerActive] = useState(false);
   const [displayName, setDisplayName] = useState(recipientName);
   const flatListRef = useRef<FlatList>(null);
+
+  // Subscribe to transfer progress updates
+  useEffect(() => {
+    const sub = chatService.observeTransferProgress().subscribe({
+      next: (progressMap) => {
+        console.log('[ChatScreen] Received transferProgressMap update:', JSON.stringify(progressMap));
+        setTransferProgress(progressMap);
+      },
+    });
+    return () => sub.unsubscribe();
+  }, [chatService]);
 
   // Fetch true peer display name if cached/different
   useEffect(() => {
@@ -494,6 +506,11 @@ export default function ChatScreen({ route, navigation }: any) {
         }
 
         console.log('[Audio Player] Loading audio note for playback...');
+        await Audio.setAudioModeAsync({
+          allowsRecordingIOS: false,
+          playsInSilentModeIOS: true,
+          shouldRouteAudioToSpeakerIfMounted: true,
+        });
         const { sound } = await Audio.Sound.createAsync(
           { uri: audioUri },
           { shouldPlay: true },
@@ -523,15 +540,50 @@ export default function ChatScreen({ route, navigation }: any) {
     }
   };
 
-  const renderAttachment = (attachment: Attachment, msgId: string) => {
+  const renderProgressBar = (progress: number | undefined) => {
+    if (progress === undefined) return null;
+    return (
+      <View style={styles.progressContainer}>
+        <View style={styles.progressTrack}>
+          <View style={[styles.progressFill, { width: `${progress}%` }]} />
+        </View>
+        <Text style={styles.progressText}>{progress}%</Text>
+      </View>
+    );
+  };
+
+  const renderAttachment = (attachment: Attachment, msgId: string, status: string) => {
+    const progress = transferProgress[msgId];
+    const isDownloaded = attachment.uri !== '';
+
     if (attachment.type === 'image') {
+      if (!isDownloaded) {
+        return (
+          <View style={[styles.imageAttachment, { backgroundColor: '#262626', justifyContent: 'center', alignItems: 'center', borderRadius: 8, padding: 12 }]}>
+            <MaterialCommunityIcons name="image-outline" size={32} color="#666" />
+            {status === 'failed' ? (
+              <Text style={{ color: '#FF3B30', fontSize: 11, marginTop: 4, textAlign: 'center' }}>Failed to download</Text>
+            ) : (
+              renderProgressBar(progress ?? 0)
+            )}
+          </View>
+        );
+      }
+
       return (
         <TouchableOpacity onPress={() => setPreviewImage(attachment.uri)}>
-          <Image
-            source={{ uri: attachment.uri }}
-            style={styles.imageAttachment}
-            contentFit="cover"
-          />
+          <View style={{ position: 'relative' }}>
+            <Image
+              source={{ uri: attachment.uri }}
+              style={styles.imageAttachment}
+              contentFit="cover"
+            />
+            {progress !== undefined && (
+              <View style={styles.progressOverlay}>
+                {renderProgressBar(progress)}
+              </View>
+            )}
+          </View>
         </TouchableOpacity>
       );
     }
@@ -542,10 +594,11 @@ export default function ChatScreen({ route, navigation }: any) {
         <View style={styles.audioContainer}>
           <TouchableOpacity
             style={styles.audioPlayButton}
-            onPress={() => toggleAudioPlayback(msgId, attachment.uri)}
+            onPress={() => isDownloaded && toggleAudioPlayback(msgId, attachment.uri)}
+            disabled={!isDownloaded || progress !== undefined}
           >
             <MaterialCommunityIcons
-              name={isCurrentPlaying ? 'pause' : 'play'}
+              name={!isDownloaded ? 'cloud-download-outline' : isCurrentPlaying ? 'pause' : 'play'}
               size={24}
               color="#FF8C42"
             />
@@ -554,24 +607,44 @@ export default function ChatScreen({ route, navigation }: any) {
             <Text style={styles.audioText} numberOfLines={1}>
               🎵 {attachment.name}
             </Text>
-            <View style={styles.audioTrack}>
-              <View
-                style={[
-                  styles.audioFill,
-                  { width: `${isCurrentPlaying ? audioProgress : 0}%` },
-                ]}
-              />
-            </View>
+            {!isDownloaded ? (
+              status === 'failed' ? (
+                <Text style={{ color: '#FF3B30', fontSize: 11 }}>Download failed</Text>
+              ) : (
+                renderProgressBar(progress ?? 0)
+              )
+            ) : (
+              <View style={styles.audioTrack}>
+                <View
+                  style={[
+                    styles.audioFill,
+                    { width: `${isCurrentPlaying ? audioProgress : 0}%` },
+                  ]}
+                />
+              </View>
+            )}
           </View>
         </View>
       );
     }
 
     if (attachment.type === 'video') {
+      if (!isDownloaded) {
+        return (
+          <View style={[styles.videoContainer, styles.videoPlaceholder]}>
+            <MaterialCommunityIcons name="video-off-outline" size={32} color="#666" />
+            <Text style={[styles.videoText, { color: status === 'failed' ? '#FF3B30' : '#CCC' }]} numberOfLines={1}>
+              {status === 'failed' ? 'Failed to download video' : 'Downloading video...'}
+            </Text>
+            {status !== 'failed' && renderProgressBar(progress ?? 0)}
+          </View>
+        );
+      }
+
       return (
         <TouchableOpacity
           style={styles.videoContainer}
-          onPress={() => setPreviewVideo(attachment.uri)}
+          onPress={() => progress === undefined && setPreviewVideo(attachment.uri)}
           activeOpacity={0.8}
         >
           <View style={styles.videoPlaceholder}>
@@ -579,16 +652,21 @@ export default function ChatScreen({ route, navigation }: any) {
             <Text style={styles.videoText} numberOfLines={1}>
               🎥 {attachment.name}
             </Text>
+            {progress !== undefined && renderProgressBar(progress)}
           </View>
-          <View style={styles.videoPlayOverlay} pointerEvents="none">
-            <MaterialCommunityIcons name="play-circle-outline" size={48} color="#FF8C42" />
-          </View>
+          {progress === undefined && (
+            <View style={styles.videoPlayOverlay} pointerEvents="none">
+              <MaterialCommunityIcons name="play-circle-outline" size={48} color="#FF8C42" />
+            </View>
+          )}
         </TouchableOpacity>
       );
     }
 
     return (
       <View style={styles.fileContainer}>
+
+
         <MaterialCommunityIcons name="file-document-outline" size={24} color="#FF8C42" />
         <Text style={styles.fileText} numberOfLines={1}>
           {attachment.name}
@@ -602,7 +680,7 @@ export default function ChatScreen({ route, navigation }: any) {
     return (
       <View style={[styles.messageContainer, isUser && styles.userMessageContainer]}>
         <View style={[styles.messageBubble, isUser && styles.userMessageBubble]}>
-          {item.attachment && renderAttachment(item.attachment, item.id)}
+          {item.attachment && renderAttachment(item.attachment, item.id, item.status)}
           {item.text.trim() !== '' && (
             <Text style={[styles.messageText, isUser && styles.userMessageText]}>
               {item.text}
@@ -612,19 +690,35 @@ export default function ChatScreen({ route, navigation }: any) {
             <Text style={[styles.timestamp, isUser && styles.userTimestamp]}>
               {item.timestamp}
             </Text>
-            {isUser && (
+            {isUser ? (
               <MaterialCommunityIcons
                 name={
                   item.status === 'read'
                     ? 'check-all'
                     : item.status === 'sent' || item.status === 'delivered'
                       ? 'check'
-                      : 'clock-outline'
+                      : item.status === 'failed'
+                        ? 'alert-circle'
+                        : 'clock-outline'
                 }
                 size={12}
-                color={item.status === 'read' ? '#02C39A' : '#999'}
+                color={item.status === 'read' ? '#02C39A' : item.status === 'failed' ? '#FF3B30' : '#999'}
                 style={{ marginLeft: 4 }}
               />
+            ) : (
+              <>
+                {item.status === 'downloading' && (
+                  <ActivityIndicator size="small" color="#FF8C42" style={{ marginLeft: 6, transform: [{ scale: 0.8 }] }} />
+                )}
+                {item.status === 'failed' && (
+                  <MaterialCommunityIcons
+                    name="alert-circle-outline"
+                    size={14}
+                    color="#FF3B30"
+                    style={{ marginLeft: 4 }}
+                  />
+                )}
+              </>
             )}
           </View>
         </View>
@@ -1101,12 +1195,46 @@ const styles = StyleSheet.create({
     right: 20,
     zIndex: 10,
   },
+  modalVideo: {
+    width: '100%',
+    height: '70%',
+  },
   modalImage: {
     width: '90%',
     height: '80%',
   },
-  modalVideo: {
+  progressContainer: {
     width: '100%',
-    height: '70%',
+    marginTop: 6,
+    alignItems: 'center',
+  },
+  progressTrack: {
+    height: 4,
+    backgroundColor: '#333',
+    borderRadius: 2,
+    width: '100%',
+    overflow: 'hidden',
+  },
+  progressFill: {
+    height: '100%',
+    backgroundColor: '#FF8C42',
+  },
+  progressText: {
+    color: '#FF8C42',
+    fontSize: 10,
+    fontWeight: '600',
+    marginTop: 4,
+  },
+  progressOverlay: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    backgroundColor: 'rgba(0,0,0,0.65)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: 16,
+    borderRadius: 8,
   },
 });

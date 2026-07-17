@@ -326,14 +326,31 @@ export class AndroidWifiP2PTransport implements PeerTransport {
     if (!this.isConnectedFlag || !WifiDirect) {
       throw new Error('[Android Wi-Fi Direct] Cannot send: transport is not connected.');
     }
-    // High-performance Uint8Array → base64 conversion using chunks to prevent call stack overflow
-    const CHUNK_SIZE = 0x4000; // 16384
-    let binary = '';
-    for (let i = 0; i < data.length; i += CHUNK_SIZE) {
-      const chunk = data.subarray(i, i + CHUNK_SIZE);
-      binary += String.fromCharCode.apply(null, chunk as any);
+    
+    // Direct high-performance Uint8Array → base64 conversion in one single pass.
+    // Avoids creating temporary binary strings and calling custom slow btoa polyfills.
+    const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+    const len = data.length;
+    const parts = new Array(Math.ceil(len / 3));
+    let partIdx = 0;
+    
+    for (let i = 0; i < len; i += 3) {
+      const w1 = data[i];
+      const w2 = i + 1 < len ? data[i + 1] : 0;
+      const w3 = i + 2 < len ? data[i + 2] : 0;
+
+      const byte1 = w1 >> 2;
+      const byte2 = ((w1 & 3) << 4) | (w2 >> 4);
+      const byte3 = ((w2 & 15) << 2) | (w3 >> 6);
+      const byte4 = w3 & 63;
+
+      let chunkStr = chars.charAt(byte1) + chars.charAt(byte2);
+      chunkStr += i + 1 < len ? chars.charAt(byte3) : '=';
+      chunkStr += i + 2 < len ? chars.charAt(byte4) : '=';
+      
+      parts[partIdx++] = chunkStr;
     }
-    const base64 = btoa(binary);
+    const base64 = parts.join('');
 
     // In JEST test environment, the mock requires the isServer flag to route the simulated Node.js TCP sockets.
     // In the real native Android runtime, the native JSI/Bridge only accepts exactly 1 argument (base64).

@@ -39,10 +39,33 @@ export class ChatService {
     chunks: string[];
   }>();
 
+  private pendingPlaceholderWrites = new Map<string, Promise<any>>();
+
+  private transferProgressSubject = new BehaviorSubject<{ [messageId: string]: number }>({});
+
   constructor(private db: Database) {
     this.repository = new MobileRepository(db);
     this.startHeartbeatTimer();
   }
+
+  observeTransferProgress(): Observable<{ [messageId: string]: number }> {
+    return this.transferProgressSubject.asObservable();
+  }
+
+  private updateTransferProgress(messageId: string, progress: number) {
+    console.log(`[ChatService] updateTransferProgress for ${messageId.substring(0, 8)}: ${progress}%`);
+    const current = { ...this.transferProgressSubject.value };
+    current[messageId] = progress;
+    this.transferProgressSubject.next(current);
+  }
+
+  private clearTransferProgress(messageId: string) {
+    console.log(`[ChatService] clearTransferProgress for ${messageId.substring(0, 8)}`);
+    const current = { ...this.transferProgressSubject.value };
+    delete current[messageId];
+    this.transferProgressSubject.next(current);
+  }
+
 
   registerSecureTransport(transport: SecureTransport) {
     if (!this.secureTransportsList.includes(transport)) {
@@ -99,6 +122,22 @@ export class ChatService {
         // If no data received for 25 seconds, assume peer went out of range or disconnected silently
         if (now - lastSeen > 25000) {
           console.log(`[ChatService] Peer ${peerId} silent for more than 25s. Pruning transport.`);
+          
+          // Mark in-progress incoming file transfers from this peer as failed in the DB
+          for (const [msgId, transfer] of Array.from(this.incomingFileTransfers.entries())) {
+            if (transfer.metadata.senderId === peerId) {
+              this.incomingFileTransfers.delete(msgId);
+              this.clearTransferProgress(msgId);
+              this.db.get<Message>('messages').find(msgId).then(msg => {
+                this.db.write(async () => {
+                  await msg.update(record => {
+                    record.localSyncStatus = 'failed';
+                  });
+                });
+              }).catch(() => {});
+            }
+          }
+
           try {
             await transport.disconnect();
           } catch (err) {
@@ -203,6 +242,18 @@ export class ChatService {
       .observeWithColumns(['sync_status']);
   }
 
+  private cachedLocalDeviceId: string | null = null;
+
+  private async getLocalDeviceId(): Promise<string> {
+    if (this.cachedLocalDeviceId) return this.cachedLocalDeviceId;
+    const localUser = await this.repository.getLocalUser();
+    if (localUser) {
+      this.cachedLocalDeviceId = (localUser._raw as any).device_id;
+      return this.cachedLocalDeviceId || 'unknown';
+    }
+    return 'unknown';
+  }
+
   /**
    * Observes all messages and groups them into unique conversations with names and unread counts.
    */
@@ -211,10 +262,8 @@ export class ChatService {
       switchMap((messages) =>
         from(
           (async () => {
-            // Fetch local user and peers asynchronously (LokiJS does not support fetchSync)
-            const localUsers = await this.db.get<LocalUser>('local_user').query().fetch();
-            const myDeviceId = (localUsers[0]?._raw as any)?.device_id as string | undefined;
-            const peers = await this.db.get<KnownPeer>('known_peers').query().fetch();
+            // Retrieve cached device ID to avoid database queries
+            const myDeviceId = await this.getLocalDeviceId();
 
             const conversationsMap = new Map<string, { lastMsg: Message; unread: number }>();
 
@@ -239,6 +288,12 @@ export class ChatService {
                 }
               }
             }
+
+            // Optimize query: Fetch only peers that are actually involved in the active conversations
+            const partnerIds = Array.from(conversationsMap.keys());
+            const peers = partnerIds.length > 0
+              ? await this.db.get<KnownPeer>('known_peers').query(Q.where('device_id', Q.oneOf(partnerIds))).fetch()
+              : [];
 
             const convos: Conversation[] = [];
             conversationsMap.forEach((val, partnerId) => {
@@ -387,10 +442,13 @@ export class ChatService {
           // The Wi-Fi Direct TCP link is already on a private local network group.
           const rawTransport = secureTransport.getRawTransport();
 
-          const base64Data = await NativeModules.WifiDirect.readFileAsBase64(attachment.uri);
-          const chunkSize = 1.5 * 1024 * 1024; // 1.5MB per chunk — balance speed & memory
-          const totalChunks = Math.ceil(base64Data.length / chunkSize);
+          const fileSize = await NativeModules.WifiDirect.getFileSize(attachment.uri);
+          const chunkSize = 1048572; // Multiple of 3 to prevent middle base64 padding corruption
+          const totalChunks = Math.max(1, Math.ceil(fileSize / chunkSize));
           const timestamp = message.createdAt;
+
+          // Initialize progress
+          this.updateTransferProgress(message.id, 0);
 
           // 1. Send metadata via SecureTransport (encrypted + signed)
           await secureTransport.send(JSON.stringify({
@@ -404,10 +462,14 @@ export class ChatService {
             timestamp
           }));
 
-          // 2. Send all chunks raw (no AES), prefixed with a small JSON header line
-          //    so the receiver can parse them without the SecureTransport layer.
+          // 2. Read and send all chunks raw (no AES), prefixed with a small JSON header line.
+          //    We read directly from disk in chunks using NativeModules.readChunkAsBase64
+          //    to avoid loading massive strings in JS memory.
           for (let i = 0; i < totalChunks; i++) {
-            const chunkData = base64Data.substring(i * chunkSize, (i + 1) * chunkSize);
+            const offset = i * chunkSize;
+            const length = Math.min(chunkSize, fileSize - offset);
+            const chunkData = await NativeModules.WifiDirect.readChunkAsBase64(attachment.uri, offset, length);
+
             const chunkEnvelope = JSON.stringify({
               type: 'chat_file_chunk',
               messageId: message.id,
@@ -420,10 +482,12 @@ export class ChatService {
             const encoded = new TextEncoder().encode(chunkEnvelope);
             await rawTransport.send(encoded);
             
-            // Yield to the React Native bridge and socket buffer to prevent congestion
-            await new Promise(r => setTimeout(r, 50));
-          }
+            // Update sending progress
+            this.updateTransferProgress(message.id, Math.round(((i + 1) / totalChunks) * 100));
 
+            // Yield to the React Native bridge and socket buffer to prevent congestion
+            await new Promise(r => setTimeout(r, 40));
+          }
 
           // 3. Send end marker via SecureTransport (encrypted + signed)
           await secureTransport.send(JSON.stringify({
@@ -432,6 +496,9 @@ export class ChatService {
             senderId: myDeviceId,
             recipientId
           }));
+
+          // Clear progress tracker
+          this.clearTransferProgress(message.id);
         } else {
           // Send regular text message
           const payload = {
@@ -459,9 +526,6 @@ export class ChatService {
     }
   }
 
-  /**
-   * Processes chunked file transfer payloads from a remote peer.
-   */
   async handleIncomingFilePayload(payload: any): Promise<void> {
     const { type, messageId } = payload;
     if (type === 'chat_file_start') {
@@ -470,12 +534,56 @@ export class ChatService {
         metadata: { senderId, recipientId, fileName, fileType, totalChunks, timestamp },
         chunks: new Array(totalChunks)
       });
-      console.log(`[ChatService] Started receiving chunked file: ${fileName}, total chunks: ${totalChunks}`);
+      // Initialize progress
+      this.updateTransferProgress(messageId, 0);
+
+      // Create a database placeholder for the incoming message so the receiver can see the bubble and progress bar
+      const placeholderPromise = (async () => {
+        try {
+          const contentHash = sha256(messageId + senderId + timestamp);
+          const exists = await this.repository.getMessageByHash(contentHash);
+          if (!exists) {
+            const body = JSON.stringify({
+              text: '',
+              attachment: {
+                uri: '', // Empty until fully received
+                type: fileType,
+                name: fileName
+              }
+            });
+            await this.repository.addNewMessage({
+              id: messageId,
+              senderId,
+              recipientId,
+              ciphertext: body,
+              signature: '',
+              contentHash,
+              hopCount: 1,
+              ttl: 16,
+              originDeviceId: senderId,
+              syncStatus: 'downloading', // Special status
+              createdAt: Date.now()
+            });
+            console.log(`[ChatService] Created placeholder for incoming file transfer ${messageId}`);
+          }
+        } catch (err) {
+          console.warn('[ChatService] Failed to create database placeholder:', err);
+        }
+      })();
+      this.pendingPlaceholderWrites.set(messageId, placeholderPromise);
     } else if (type === 'chat_file_chunk') {
       const { chunkIndex, chunkData } = payload;
       const transfer = this.incomingFileTransfers.get(messageId);
       if (transfer) {
         transfer.chunks[chunkIndex] = chunkData;
+        
+        // Calculate progress percentage
+        let receivedCount = 0;
+        for (let j = 0; j < transfer.chunks.length; j++) {
+          if (transfer.chunks[j] !== undefined) receivedCount++;
+        }
+        const progress = Math.round((receivedCount / transfer.metadata.totalChunks) * 100);
+        this.updateTransferProgress(messageId, progress);
       }
     } else if (type === 'chat_file_end') {
       const transfer = this.incomingFileTransfers.get(messageId);
@@ -483,24 +591,56 @@ export class ChatService {
         console.log(`[ChatService] Completed receiving chunked file: ${transfer.metadata.fileName}`);
         const base64Data = transfer.chunks.join('');
         this.incomingFileTransfers.delete(messageId);
+        this.clearTransferProgress(messageId);
+
+        // Await any pending placeholder write to prevent DB race condition
+        const pendingWrite = this.pendingPlaceholderWrites.get(messageId);
+        if (pendingWrite) {
+          await pendingWrite;
+          this.pendingPlaceholderWrites.delete(messageId);
+        }
 
         // Write the base64 string to a local cache file natively
         const localUri = await NativeModules.WifiDirect.writeBase64ToFile(base64Data, transfer.metadata.fileName);
 
-        // Reconstruct incoming message payload
-        const chatPayload = {
-          id: messageId,
-          senderId: transfer.metadata.senderId,
-          recipientId: transfer.metadata.recipientId,
-          text: '',
-          attachmentMeta: {
-            uri: localUri,
-            type: transfer.metadata.fileType,
-            name: transfer.metadata.fileName
-          },
-          timestamp: transfer.metadata.timestamp
-        };
-        await this.handleIncomingMessage(chatPayload);
+        // Find placeholder and update it to finished
+        try {
+          const msg = await this.db.get<Message>('messages').find(messageId);
+          const body = JSON.stringify({
+            text: '',
+            attachment: {
+              uri: localUri,
+              type: transfer.metadata.fileType,
+              name: transfer.metadata.fileName
+            }
+          });
+          await this.db.write(async () => {
+            await msg.update(record => {
+              record.ciphertext = body;
+              record.localSyncStatus = 'delivered'; // Update to delivered (received successfully)
+            });
+          });
+          console.log(`[ChatService] Updated placeholder message ${messageId} to delivered.`);
+        } catch (err) {
+          // If for some reason finding fails, save as new
+          console.log('[ChatService] Placeholder not found, saving as new.');
+          const chatPayload = {
+            id: messageId,
+            senderId: transfer.metadata.senderId,
+            recipientId: transfer.metadata.recipientId,
+            text: '',
+            attachmentMeta: {
+              uri: localUri,
+              type: transfer.metadata.fileType,
+              name: transfer.metadata.fileName
+            },
+            timestamp: transfer.metadata.timestamp
+          };
+          await this.handleIncomingMessage(chatPayload);
+        }
+
+        // Send delivery ACK
+        await this.sendDeliveryAck(messageId, transfer.metadata.senderId);
       }
     }
   }

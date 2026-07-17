@@ -14,11 +14,15 @@ export const localDbMigrations = schemaMigrations({
         }),
       ],
     },
+    {
+      toVersion: 3,
+      steps: [], // Schema bump for recipient_id indexing
+    },
   ],
 });
 
 export const localDbSchema = appSchema({
-  version: 2,
+  version: 3,
   tables: [
     tableSchema({
       name: 'local_user',
@@ -46,7 +50,7 @@ export const localDbSchema = appSchema({
       name: 'messages',
       columns: [
         { name: 'sender_id', type: 'string', isIndexed: true },
-        { name: 'recipient_id', type: 'string', isOptional: true },
+        { name: 'recipient_id', type: 'string', isOptional: true, isIndexed: true },
         { name: 'group_id', type: 'string', isOptional: true },
         { name: 'ciphertext', type: 'string' },
         { name: 'signature', type: 'string' },
