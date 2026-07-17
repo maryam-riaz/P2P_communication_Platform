@@ -3,25 +3,21 @@
   "version": "1.0.0",
   "private": true,
   "scripts": {
+    "start": "pnpm --filter mobile start",
     "test": "pnpm --recursive run test",
     "test:shared": "pnpm --filter shared test",
     "test:mobile": "pnpm --filter mobile test",
     "test:backend": "pnpm --filter backend test",
-    "android": "expo run:android",
-    "ios": "expo run:ios"
+    "android": "pnpm --filter mobile android",
+    "ios": "pnpm --filter mobile ios"
   },
   "devDependencies": {
-    "typescript": "^5.5.0",
+    "typescript": "~5.9.2",
     "jest": "^29.7.0",
     "ts-jest": "^29.1.5",
     "@types/jest": "^29.5.12"
   },
   "workspaces": [
     "packages/*"
-  ],
-  "dependencies": {
-    "expo": "~54.0.35",
-    "react": "19.1.0",
-    "react-native": "0.81.5"
-  }
+  ]
 }

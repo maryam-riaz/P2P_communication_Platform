@@ -441,8 +441,8 @@ export function useInitializeServices() {
           console.warn('[P2P Bootstrap] Failed to start BLE advertising (check if Bluetooth is enabled):', err);
         }
  
-        // â”€â”€ Wire up Wi-Fi Direct Group formation listeners â”€â”€
-        unsubConnectionInfo = AndroidWifiP2PTransport.onConnectionInfo(async (info) => {
+        // ── Wire up Wi-Fi Direct Group formation listeners ──
+        const handleConnectionInfo = async (info: any) => {
           console.log('[P2P DEBUG] Connection Info Event received:', info);
           if (info.groupFormed) {
             let ownerAddress = info.groupOwnerAddress;
@@ -456,7 +456,7 @@ export function useInitializeServices() {
                 // per-connection ID. Re-opening here is skipped to avoid
                 // clobbering an existing connection, but a genuinely concurrent
                 // 3rd/4th client requires the native module to accept() in a
-                // loop and tag events with a connection id â€” that change has
+                // loop and tag events with a connection id — that change has
                 // to happen in the (currently missing from this repo) Kotlin
                 // WifiDirect module.
                 console.log('[P2P DEBUG] Server socket already bound. Skipping duplicate openServerSocket.');
@@ -471,7 +471,7 @@ export function useInitializeServices() {
                 scheduleHandshakeRecovery();
                 // Store the MAC of the client that just connected (captured by lastTargetMacAddress
                 // on the other side). On the server side we don't know the client MAC until the
-                // handshake completes, so we store nothing here â€” that's fine; the connKey is
+                // handshake completes, so we store nothing here — that's fine; the connKey is
                 // unique enough for the owner's inbound socket lifetime.
                 void ownerEntry;
  
@@ -563,12 +563,14 @@ export function useInitializeServices() {
               }
             }
           } else {
-            console.log('[P2P DEBUG] Group is not formed (info.groupFormed is false). Resetting connection flags.');
+            console.log('[P2P DEBUG] Group is not formed (info.groupFormed is false). Waiting for connection to establish...');
+            // We do NOT reset connection flags here, because during the CONNECTING phase, groupFormed is false.
+            // Resetting here would immediately abort any pending connection attempts.
             serverSocketBound = false;
-            groupRole = 'unassigned';
-            connectingKeys.clear();
           }
-        });
+        };
+
+        unsubConnectionInfo = AndroidWifiP2PTransport.onConnectionInfo(handleConnectionInfo);
  
         unsubPeersChanged = AndroidWifiP2PTransport.onPeersChanged(async (peers) => {
           console.log('[P2P DEBUG] Wi-Fi Direct peers changed. Peers count:', peers.length, 'Peers:', peers);
@@ -686,6 +688,33 @@ export function useInitializeServices() {
           try {
             await AndroidWifiP2PTransport.connectToPeer(candidateToConnect.deviceAddress);
             console.log('[P2P DEBUG] Native connectToPeer call resolved successfully. Waiting for Group Formation connection info event...');
+            
+            // Active polling fallback: check group status periodically to handle lost/delayed OS broadcasts
+            let pollCount = 0;
+            const intervalId = setInterval(async () => {
+              pollCount++;
+              if (pollCount > 15) {
+                clearInterval(intervalId);
+                console.warn('[P2P DEBUG] Active poll timed out after 15 seconds. Group still not formed.');
+                if (groupRole === 'unassigned') {
+                  connectingKeys.delete(candidateToConnect.deviceAddress);
+                  await performP2PCleanup('Initiator Poll Timeout');
+                }
+                return;
+              }
+              try {
+                const info = await AndroidWifiP2PTransport.getConnectionInfo();
+                if (info.groupFormed) {
+                  clearInterval(intervalId);
+                  if (groupRole === 'unassigned') {
+                    console.log(`[P2P DEBUG] Group formation detected via active poll (attempt ${pollCount}). Setting up socket...`);
+                    await handleConnectionInfo(info);
+                  }
+                }
+              } catch (e) {
+                console.warn('[P2P DEBUG] Connection info poll failed:', e);
+              }
+            }, 1000);
           } catch (err: any) {
             console.error('[P2P DEBUG] connectToPeer failed:', err);
             connectingKeys.delete(candidateToConnect.deviceAddress);

@@ -119,9 +119,17 @@ export class ChatService {
       for (const [peerId, transport] of Array.from(this.activeTransports.entries())) {
         const lastSeen = this.transportLastSeenMap.get(peerId) || 0;
         
-        // If no data received for 25 seconds, assume peer went out of range or disconnected silently
-        if (now - lastSeen > 25000) {
-          console.log(`[ChatService] Peer ${peerId} silent for more than 25s. Pruning transport.`);
+        // If no data received for 25 seconds, check if we should attempt a handshake retry
+        // or fully prune the transport (if silent for more than 35 seconds)
+        if (now - lastSeen > 25000 && now - lastSeen <= 35000) {
+          console.log(`[ChatService] Peer ${peerId} inactive/silent (>25s). Attempting handshake retry to revive connection...`);
+          try {
+            await transport.establishHandshake();
+          } catch (err) {
+            console.warn(`[ChatService] Failed establishing handshake to revive silent peer ${peerId}:`, err);
+          }
+        } else if (now - lastSeen > 35000) {
+          console.log(`[ChatService] Peer ${peerId} silent for more than 35s. Pruning transport.`);
           
           // Mark in-progress incoming file transfers from this peer as failed in the DB
           for (const [msgId, transfer] of Array.from(this.incomingFileTransfers.entries())) {

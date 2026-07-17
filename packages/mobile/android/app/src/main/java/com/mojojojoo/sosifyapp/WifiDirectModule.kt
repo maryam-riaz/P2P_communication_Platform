@@ -206,12 +206,18 @@ class WifiDirectModule(private val reactContext: ReactApplicationContext) :
     @ReactMethod
     fun getConnectionInfo(promise: Promise) {
         wifiP2pManager.requestConnectionInfo(channel) { info: WifiP2pInfo ->
-            val map = Arguments.createMap()
-            map.putString("groupOwnerAddress", info.groupOwnerAddress?.hostAddress ?: "")
-            map.putBoolean("isGroupOwner", info.isGroupOwner)
-            map.putBoolean("groupFormed", info.groupFormed)
-            sendEvent("WifiDirectConnectionInfo", map)
-            promise.resolve(map)
+            val mapForEvent = Arguments.createMap()
+            mapForEvent.putString("groupOwnerAddress", info.groupOwnerAddress?.hostAddress ?: "")
+            mapForEvent.putBoolean("isGroupOwner", info.isGroupOwner)
+            mapForEvent.putBoolean("groupFormed", info.groupFormed)
+            
+            val mapForPromise = Arguments.createMap()
+            mapForPromise.putString("groupOwnerAddress", info.groupOwnerAddress?.hostAddress ?: "")
+            mapForPromise.putBoolean("isGroupOwner", info.isGroupOwner)
+            mapForPromise.putBoolean("groupFormed", info.groupFormed)
+            
+            sendEvent("WifiDirectConnectionInfo", mapForEvent)
+            promise.resolve(mapForPromise)
         }
     }
 

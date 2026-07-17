@@ -1,3 +1,4 @@
+import '../src/utils/polyfills';
 import { Platform, LogBox } from 'react-native';
 import * as Crypto from 'expo-crypto';
 

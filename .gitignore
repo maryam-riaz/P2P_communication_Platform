@@ -43,3 +43,28 @@ out/
 .env.development.local
 .env.test.local
 .env.production.local
+.env*.local
+
+# Expo / Metro / Web builds
+web-build/
+expo-env.d.ts
+.metro-health-check*
+app-example/
+coverage/
+
+# Native / Generated build files
+.kotlin/
+*.orig.*
+*.p12
+*.mobileprovision
+*.pem
+/ios
+
+# Debug & error logs
+npm-debug.*
+yarn-debug.*
+yarn-error.*
+*.stackdump
+
+# TypeScript
+*.tsbuildinfo
