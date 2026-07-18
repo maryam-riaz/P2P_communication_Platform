@@ -4,6 +4,10 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.net.ConnectivityManager
+import android.net.Network
+import android.net.NetworkCapabilities
+import android.net.NetworkRequest
 import android.net.wifi.WpsInfo
 import android.net.wifi.p2p.WifiP2pConfig
 import android.net.wifi.p2p.WifiP2pDevice
@@ -17,6 +21,7 @@ import android.net.wifi.p2p.WifiP2pManager.ConnectionInfoListener
 import android.net.wifi.WifiManager
 import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothManager
+import android.os.Build
 import com.facebook.react.bridge.Arguments
 import com.facebook.react.bridge.Promise
 import com.facebook.react.bridge.ReactApplicationContext
@@ -26,6 +31,9 @@ import com.facebook.react.bridge.WritableArray
 import com.facebook.react.modules.core.DeviceEventManagerModule
 import java.io.InputStream
 import java.io.OutputStream
+import java.net.InetAddress
+import java.net.InetSocketAddress
+import java.net.NetworkInterface
 import java.net.ServerSocket
 import java.net.Socket
 import java.util.concurrent.Executors
@@ -54,8 +62,17 @@ class WifiDirectModule(private val reactContext: ReactApplicationContext) :
         reactContext.getSystemService(Context.WIFI_P2P_SERVICE) as WifiP2pManager
     private val wifiManager: WifiManager =
         reactContext.applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
+    private val connectivityManager: ConnectivityManager =
+        reactContext.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
     private lateinit var channel: Channel
     private var broadcastReceiver: WifiDirectBroadcastReceiver? = null
+
+    // Wi-Fi Direct P2P network — captured after group formation and used to
+    // bind TCP client sockets to the correct (non-internet) network interface.
+    // Without this binding, Socket.connect() may route through the mobile
+    // data interface, causing TCP timeouts.
+    private var p2pNetwork: Network? = null
+    private var p2pNetworkCallback: ConnectivityManager.NetworkCallback? = null
 
     // TCP socket state
     private val executor = Executors.newCachedThreadPool()
@@ -121,6 +138,39 @@ class WifiDirectModule(private val reactContext: ReactApplicationContext) :
             broadcastReceiver = WifiDirectBroadcastReceiver(wifiP2pManager, channel, this)
             reactContext.registerReceiver(broadcastReceiver, intentFilter)
 
+            // Register network callback to capture the Wi-Fi Direct P2P network
+            // after group formation. This is critical for Android 5+ where TCP
+            // client sockets must be bound to the P2P network to avoid routing
+            // through the mobile data interface.
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+                val networkRequest = NetworkRequest.Builder()
+                    .addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
+                    .build()
+                p2pNetworkCallback = object : ConnectivityManager.NetworkCallback() {
+                    override fun onAvailable(network: Network) {
+                        // Check if this network has a P2P-like link property
+                        val caps = connectivityManager.getNetworkCapabilities(network)
+                        val lp = connectivityManager.getLinkProperties(network)
+                        val isP2p = lp?.interfaceName?.startsWith("p2p") == true ||
+                            lp?.linkAddresses?.any { addr ->
+                                val host = addr.address?.hostAddress ?: ""
+                                host.startsWith("192.168.49.") || host.startsWith("192.168.50.")
+                            } == true
+                        if (isP2p) {
+                            p2pNetwork = network
+                            android.util.Log.d("WifiDirectModule", "P2P network captured: ${lp?.interfaceName} -> $network")
+                        }
+                    }
+                    override fun onLost(network: Network) {
+                        if (network == p2pNetwork) {
+                            p2pNetwork = null
+                            android.util.Log.d("WifiDirectModule", "P2P network lost: $network")
+                        }
+                    }
+                }
+                connectivityManager.registerNetworkCallback(networkRequest, p2pNetworkCallback!!)
+            }
+
             promise.resolve(null)
         } catch (e: Exception) {
             promise.reject("WIFI_DIRECT_INIT_ERROR", e.message, e)
@@ -132,6 +182,11 @@ class WifiDirectModule(private val reactContext: ReactApplicationContext) :
         try {
             broadcastReceiver?.let { reactContext.unregisterReceiver(it) }
             broadcastReceiver = null
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+                p2pNetworkCallback?.let { connectivityManager.unregisterNetworkCallback(it) }
+                p2pNetworkCallback = null
+            }
+            p2pNetwork = null
             closeTcpResources()
             promise.resolve(null)
         } catch (e: Exception) {
@@ -319,6 +374,9 @@ class WifiDirectModule(private val reactContext: ReactApplicationContext) :
 
     /**
      * Opens a TCP ServerSocket on the given port (default 8888).
+     * The socket is bound to the P2P interface's local IP when available,
+     * ensuring it only accepts connections from the Wi-Fi Direct P2P subnet.
+     *
      * Fires "WifiDirectTcpConnected" when a client connects.
      * Fires "WifiDirectTcpData" (base64 string) for every incoming data chunk.
      * Fires "WifiDirectTcpDisconnected" when the connection closes.
@@ -327,7 +385,15 @@ class WifiDirectModule(private val reactContext: ReactApplicationContext) :
     fun openServerSocket(port: Int, promise: Promise) {
         executor.execute {
             try {
-                serverSocket = ServerSocket(port)
+                // Bind ServerSocket to the P2P interface's local IP if available
+                val p2pAddress = findP2pLocalAddress()
+                if (p2pAddress != null) {
+                    serverSocket = ServerSocket(port, 50, p2pAddress)
+                    android.util.Log.d("WifiDirectModule", "ServerSocket bound to P2P address: ${p2pAddress.hostAddress}:$port")
+                } else {
+                    serverSocket = ServerSocket(port)
+                    android.util.Log.d("WifiDirectModule", "ServerSocket bound to 0.0.0.0:$port (no P2P address found)")
+                }
                 promise.resolve(null)
 
                 // Accept a single client (Wi-Fi Direct is point-to-point)
@@ -350,12 +416,31 @@ class WifiDirectModule(private val reactContext: ReactApplicationContext) :
      * Connects as a TCP client to the given IP:port.
      * Fires "WifiDirectTcpData" (base64 string) for every incoming data chunk.
      * Fires "WifiDirectTcpDisconnected" when the connection closes.
+     *
+     * CRITICAL: The socket is explicitly bound to the Wi-Fi Direct P2P network
+     * (if available) to prevent Android's routing layer from sending TCP
+     * packets through the mobile data interface — the root cause of
+     * socket timeout errors during peer-to-peer connections.
      */
     @ReactMethod
     fun connectToSocket(ipAddress: String, port: Int, promise: Promise) {
         executor.execute {
             try {
-                val sock = Socket(ipAddress, port)
+                val sock = Socket()
+                // Bind the socket to the Wi-Fi Direct P2P network so TCP
+                // segments go through the P2P interface, not mobile data.
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+                    val network = p2pNetwork
+                    if (network != null) {
+                        network.bindSocket(sock)
+                        android.util.Log.d("WifiDirectModule", "Socket bound to P2P network: $network")
+                    } else {
+                        android.util.Log.w("WifiDirectModule", "No P2P network captured — socket may route through default network")
+                    }
+                }
+                // Use a 15-second connect timeout to prevent indefinite
+                // blocking when the peer is unreachable.
+                sock.connect(InetSocketAddress(ipAddress, port), 15000)
                 clientSocket = sock
                 outputStream = sock.getOutputStream()
                 promise.resolve(null)
@@ -404,6 +489,48 @@ class WifiDirectModule(private val reactContext: ReactApplicationContext) :
     }
 
     // ─── Helpers ──────────────────────────────────────────────────────────────
+
+    /**
+     * Finds the local IP address assigned to the Wi-Fi Direct P2P interface.
+     * This is used to bind the ServerSocket to the correct interface so that
+     * TCP connections from the P2P client reach the server reliably.
+     *
+     * Returns null if no P2P interface is active.
+     */
+    private fun findP2pLocalAddress(): InetAddress? {
+        try {
+            val interfaces = NetworkInterface.getNetworkInterfaces()
+            while (interfaces?.hasMoreElements() == true) {
+                val iface = interfaces.nextElement()
+                if (iface.name.startsWith("p2p") || iface.name.startsWith("eth0")) {
+                    val addresses = iface.inetAddresses
+                    while (addresses?.hasMoreElements() == true) {
+                        val addr = addresses.nextElement()
+                        if (!addr.isLoopbackAddress && addr is java.net.Inet4Address) {
+                            android.util.Log.d("WifiDirectModule", "Found P2P local address: ${addr.hostAddress} on ${iface.name}")
+                            return addr
+                        }
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            android.util.Log.e("WifiDirectModule", "Error finding P2P local address", e)
+        }
+        // Fallback: also check ConnectivityManager's link properties for the
+        // P2P network if we captured it.
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+            val network = p2pNetwork ?: return null
+            val lp = connectivityManager.getLinkProperties(network) ?: return null
+            for (linkAddr in lp.linkAddresses) {
+                val candidate = linkAddr.address ?: continue
+                if (!candidate.isLoopbackAddress && candidate is java.net.Inet4Address) {
+                    android.util.Log.d("WifiDirectModule", "Found P2P local address via link props: ${candidate.hostAddress}")
+                    return candidate
+                }
+            }
+        }
+        return null
+    }
 
     private fun readLoop(input: InputStream) {
         val buffer = ByteArray(262144) // 256KB read buffer — reduces React Native bridge events by 64x

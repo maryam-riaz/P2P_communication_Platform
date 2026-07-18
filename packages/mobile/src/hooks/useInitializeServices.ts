@@ -4,7 +4,7 @@ import { useDispatch } from 'react-redux';
 import { logout } from '../redux/slices/authSlice';
 import LokiJSAdapter from '@nozbe/watermelondb/adapters/lokijs';
 
-import { Platform, AppState, AppStateStatus, PermissionsAndroid } from 'react-native';
+import { Platform, AppState, AppStateStatus } from 'react-native';
 import * as Location from 'expo-location';
 import { secureStore as SecureStore } from '../utils/secureStore';
 
@@ -16,7 +16,7 @@ import { startScanning, stopScanning, cleanupBleScanner } from '../comms/ble/ble
 import { initializeBleManager } from '../comms/ble/shared-ble-manager';
 import { PeerRegistry } from '../services/PeerRegistry';
 import { BleAdvertiser } from '../comms/ble/ble-advertiser';
-import { requestBlePermissions } from '../comms/ble/ble-permission-helper';
+import { requestP2pPermissions } from '../comms/ble/ble-permission-helper';
 import { AndroidWifiP2PTransport } from '../comms/wifi-direct/wifi-p2p-transport.android';
 import { SecureTransport } from '../comms/secure-transport';
 
@@ -434,38 +434,29 @@ export function useInitializeServices() {
         // TDOWN: Always remove/disconnect any pre-existing native Wi-Fi Direct groups first!
         await performP2PCleanup('Bootstrap');
 
-        // Request Bluetooth permissions before starting advertising/scanning
-        const permissionsGranted = await requestBlePermissions();
-        if (!permissionsGranted) {
-          console.warn('[P2P Bootstrap] Bluetooth permissions not granted. Cannot start advertising or scanning.');
+        // === STEP 1: Strict Sequential Permission Gate ===
+        // Request ALL required permissions (BLE + Wi-Fi Direct + Location)
+        // before proceeding to any hardware operation.
+        const permResult = await requestP2pPermissions();
+        if (!permResult.allGranted) {
+          console.warn(
+            `[P2P Bootstrap] Permission gate REJECTED. Missing: ${permResult.deniedSummary}. ` +
+            'Cannot start advertising, scanning, or discovery without all P2P permissions.'
+          );
           return;
         }
+        console.log('[P2P Bootstrap] Permission gate PASSED. All P2P permissions granted.');
 
-        // --- Audit & Log Runtime Permissions ---
+        // Verify location services are enabled (BLE scan requires them on Android)
         if (Platform.OS === 'android') {
-          try {
-            const androidVersion = parseInt(String(Platform.Version), 10);
-            if (androidVersion >= 31) {
-              const scanGranted = await PermissionsAndroid.check(PermissionsAndroid.PERMISSIONS.BLUETOOTH_SCAN);
-              const connectGranted = await PermissionsAndroid.check(PermissionsAndroid.PERMISSIONS.BLUETOOTH_CONNECT);
-              const advertiseGranted = await PermissionsAndroid.check(PermissionsAndroid.PERMISSIONS.BLUETOOTH_ADVERTISE);
-              console.log(`[P2P Bootstrap] Permission Audit (API 31+): SCAN=${scanGranted}, CONNECT=${connectGranted}, ADVERTISE=${advertiseGranted}`);
-            } else {
-              const locGranted = await PermissionsAndroid.check(PermissionsAndroid.PERMISSIONS.ACCESS_FINE_LOCATION);
-              console.log(`[P2P Bootstrap] Permission Audit (API <31): ACCESS_FINE_LOCATION=${locGranted}`);
-            }
-            
-            const locServicesEnabled = await Location.hasServicesEnabledAsync();
-            console.log(`[P2P Bootstrap] Location Services Enabled: ${locServicesEnabled}`);
-            if (!locServicesEnabled) {
-              console.warn('[P2P Bootstrap] Location Services are DISABLED. Android may silently drop BLE scan results!');
-            }
-          } catch (err) {
-            console.warn('[P2P Bootstrap] Failed to audit permissions / location services:', err);
+          const locServicesEnabled = await Location.hasServicesEnabledAsync();
+          console.log(`[P2P Bootstrap] Location Services Enabled: ${locServicesEnabled}`);
+          if (!locServicesEnabled) {
+            console.warn('[P2P Bootstrap] Location Services are DISABLED. Android may silently drop BLE scan results!');
           }
         }
 
-        // Initialize BLE manager
+        // === STEP 2: Initialize Hardware ===
         try {
           await initializeBleManager();
         } catch (e) {
@@ -482,8 +473,8 @@ export function useInitializeServices() {
 
         const displayName = (user._raw as any).display_name || 'Peer';
 
-        // Instantiate Phase 2 BLE scanning & advertising
-        const pubKeyHash = publicKey.slice(0, 8); // 4-byte hash (8 hex chars)
+        // === STEP 2.5: BLE Advertising ===
+        const pubKeyHash = publicKey.slice(0, 8);
         currentAdvertiser = new BleAdvertiser(deviceId, role, pubKeyHash, displayName);
         try {
           await currentAdvertiser.startAdvertising();
@@ -491,10 +482,30 @@ export function useInitializeServices() {
           console.warn('[P2P Bootstrap] Failed to start BLE advertising (check if Bluetooth is enabled):', err);
         }
 
+        // === STEP 3: Wire up Wi-Fi Direct and BLE Discovery ===
+        // Create a deferred promise to track first peer IP resolution
+        let resolveFirstPeerIp: (() => void) | null = null;
+        let rejectFirstPeerIp: ((err: Error) => void) | null = null;
+        let firstPeerIpTimeout: ReturnType<typeof setTimeout> | null = null;
+        const firstPeerIpPromise = new Promise<void>((resolve, reject) => {
+          resolveFirstPeerIp = resolve;
+          rejectFirstPeerIp = reject;
+        });
+        let firstPeerIpResolved = false;
+
         // ── Wire up Wi-Fi Direct Group formation listeners ──
         const handleConnectionInfo = async (info: any) => {
           console.log('[P2P DEBUG] Connection Info Event received:', info);
           if (info.groupFormed) {
+            // Resolve the first-peer-IP promise so STEP 3 completes
+            if (!firstPeerIpResolved && resolveFirstPeerIp) {
+              firstPeerIpResolved = true;
+              resolveFirstPeerIp();
+              if (firstPeerIpTimeout) {
+                clearTimeout(firstPeerIpTimeout);
+                firstPeerIpTimeout = null;
+              }
+            }
             let ownerAddress = info.groupOwnerAddress;
             const isOwner = info.isGroupOwner;
 
@@ -623,6 +634,7 @@ export function useInitializeServices() {
         unsubConnectionInfo = AndroidWifiP2PTransport.onConnectionInfo(handleConnectionInfo);
 
         unsubPeersChanged = AndroidWifiP2PTransport.onPeersChanged(async (peers) => {
+          console.log('[P2P DEBUG] Wi-Fi Direct peers changed. Peers count:', peers.length, 'Peers:', peers);
           console.log('[P2P DEBUG] Wi-Fi Direct peers changed. Peers count:', peers.length, 'Peers:', peers);
 
           // A device already committed as a CLIENT of another group cannot
@@ -780,6 +792,11 @@ export function useInitializeServices() {
           }
         });
 
+        console.log('[P2P Bootstrap] STEP 3 INIT: Wi-Fi Direct listeners registered. Triggering initial discoverPeers...');
+        AndroidWifiP2PTransport.discoverPeers().catch((err) =>
+          console.warn('[P2P Bootstrap] Initial discoverPeers failed:', err)
+        );
+
         let lastDiscoverTime = 0;
         const scannedPeersCache = new Set<string>();
 
@@ -877,6 +894,21 @@ export function useInitializeServices() {
           await startScanning(handlePeerDiscovered);
         } catch (err) {
           console.warn('[P2P Bootstrap] Failed to start BLE scanning (check if Bluetooth is enabled):', err);
+        }
+
+        // === STEP 4: Await First Peer IP Resolution ===
+        // Wait up to 120s for the first Wi-Fi Direct group to form and
+        // the group owner IP to become available.
+        firstPeerIpTimeout = setTimeout(() => {
+          if (!firstPeerIpResolved && rejectFirstPeerIp) {
+            rejectFirstPeerIp(new Error('Timed out waiting for first peer IP resolution (120s)'));
+          }
+        }, 120000);
+        try {
+          await firstPeerIpPromise;
+          console.log('[P2P Bootstrap] STEP 4 COMPLETE: First peer IP resolved. Group formed.');
+        } catch (err) {
+          console.warn('[P2P Bootstrap] STEP 4 TIMEOUT: No peer IP resolved within 120s. Discovery may continue asynchronously:', err);
         }
       };
 
