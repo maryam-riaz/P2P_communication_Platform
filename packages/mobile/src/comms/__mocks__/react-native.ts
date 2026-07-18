@@ -133,9 +133,14 @@ const WifiDirectMock = {
 
 export const NativeModules = {
   BleAdvertiser: {
-    startAdvertising: jest.fn().mockResolvedValue(undefined),
+    startAdvertising: jest.fn().mockResolvedValue({ capability: 'extended' }),
     stopAdvertising: jest.fn().mockResolvedValue(undefined),
-    isAdvertisingSupported: jest.fn().mockResolvedValue(true),
+    getAdvertisingCapabilities: jest.fn().mockResolvedValue({
+      canAdvertise: true,
+      supportsExtended: true,
+      isCurrentlyAdvertising: false,
+      currentCapability: 'scan_only',
+    }),
   },
   WifiDirect: WifiDirectMock,
 };

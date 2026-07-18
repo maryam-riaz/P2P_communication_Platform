@@ -1,5 +1,12 @@
 import { NativeModules } from 'react-native';
-import { DISASTER_P2P_SERVICE_UUID, UserRole } from './ble-types';
+import {
+  DISASTER_P2P_MAGIC,
+  AD_PAYLOAD_SIZE_FULL,
+  AD_PAYLOAD_SIZE_TRIMMED,
+  type UserRole,
+  type BleAdvertiseResult,
+  type BleAdvertiseCapability,
+} from './ble-types';
 
 const { BleAdvertiser: NativeBleAdvertiser } = NativeModules;
 
@@ -19,46 +26,110 @@ export function uuidToBytes(uuid: string): Uint8Array {
 }
 
 /**
- * Packs the custom manufacturer data payload (25 bytes).
+ * Packs the FULL manufacturer data payload (27 bytes) for BLE 5.0 extended advertising.
+ *
  * Payload format:
- * - device_id: 16 bytes (UUID)
- * - role: 1 byte (0 = user, 1 = responder, 2 = admin)
- * - public_key_hash: 4 bytes (hex SHA-256 hash of public key)
- * - timestamp: 4 bytes (unix epoch seconds, big-endian)
+ * - magic:          2 bytes (0xD2 0x50 — app identification)
+ * - device_id:     16 bytes (UUID)
+ * - role:           1 byte  (0 = victim, 1 = rescuer, 2 = admin)
+ * - public_key_hash: 4 bytes (first 4 bytes of SHA-256(pubkey))
+ * - timestamp:      4 bytes (Unix epoch seconds, big-endian)
  */
-export function packAdvertisementPayload(
+export function packFullPayload(
   deviceId: string,
   role: UserRole,
   publicKeyHashHex: string,
   timestampSeconds: number
 ): Uint8Array {
-  const payload = new Uint8Array(25);
+  const payload = new Uint8Array(AD_PAYLOAD_SIZE_FULL);
 
-  // 1. Pack Device ID (16 bytes)
+  // 1. Magic prefix (2 bytes)
+  payload[0] = DISASTER_P2P_MAGIC[0];
+  payload[1] = DISASTER_P2P_MAGIC[1];
+
+  // 2. Device ID (16 bytes)
   const uuidBytes = uuidToBytes(deviceId);
-  payload.set(uuidBytes, 0);
+  payload.set(uuidBytes, 2);
 
-  // 2. Pack Role (1 byte)
+  // 3. Role (1 byte)
   const roleVal = role === 'user' ? 0 : role === 'responder' ? 1 : 2;
-  payload[16] = roleVal;
+  payload[18] = roleVal;
 
-  // 3. Pack Public Key Hash (4 bytes)
+  // 4. Public Key Hash (4 bytes)
   const pkHex = publicKeyHashHex.padStart(8, '0');
-  const pkHashBytes = new Uint8Array(4);
   for (let i = 0; i < 4; i++) {
-    pkHashBytes[i] = parseInt(pkHex.substring(i * 2, i * 2 + 2), 16);
+    payload[19 + i] = parseInt(pkHex.substring(i * 2, i * 2 + 2), 16);
   }
-  payload.set(pkHashBytes, 17);
 
-  // 4. Pack Timestamp (4 bytes, big endian)
+  // 5. Timestamp (4 bytes, big-endian)
   const view = new DataView(payload.buffer, payload.byteOffset, payload.byteLength);
-  view.setUint32(21, timestampSeconds, false);
+  view.setUint32(23, timestampSeconds, false);
 
   return payload;
 }
 
+/**
+ * Packs the TRIMMED manufacturer data payload (23 bytes) for legacy BLE advertising.
+ *
+ * Fits within the 31-byte legacy BLE limit:
+ *   3 (flags) + 1+1+2+23 (manufacturer data AD) = 30/31 bytes (1 byte margin)
+ *
+ * Payload format:
+ * - magic:          2 bytes (0xD2 0x50 — app identification)
+ * - device_id:     16 bytes (UUID)
+ * - role:           1 byte  (0 = victim, 1 = rescuer, 2 = admin)
+ * - public_key_hash: 2 bytes (first 2 bytes of SHA-256(pubkey))
+ * - timestamp:      2 bytes (minutes since midnight UTC, wraps daily)
+ */
+export function packTrimmedPayload(
+  deviceId: string,
+  role: UserRole,
+  publicKeyHashHex: string,
+  timestampSeconds: number
+): Uint8Array {
+  const payload = new Uint8Array(AD_PAYLOAD_SIZE_TRIMMED);
+
+  // 1. Magic prefix (2 bytes)
+  payload[0] = DISASTER_P2P_MAGIC[0];
+  payload[1] = DISASTER_P2P_MAGIC[1];
+
+  // 2. Device ID (16 bytes)
+  const uuidBytes = uuidToBytes(deviceId);
+  payload.set(uuidBytes, 2);
+
+  // 3. Role (1 byte)
+  const roleVal = role === 'user' ? 0 : role === 'responder' ? 1 : 2;
+  payload[18] = roleVal;
+
+  // 4. Public Key Hash — truncated to 2 bytes
+  const pkHex = publicKeyHashHex.padStart(8, '0');
+  for (let i = 0; i < 2; i++) {
+    payload[19 + i] = parseInt(pkHex.substring(i * 2, i * 2 + 2), 16);
+  }
+
+  // 5. Timestamp — minutes since midnight UTC (2 bytes, big-endian, wraps at 1440)
+  const minutesSinceMidnight = Math.floor(timestampSeconds % 86400 / 60);
+  const trimmedView = new DataView(payload.buffer, payload.byteOffset, payload.byteLength);
+  trimmedView.setUint16(21, minutesSinceMidnight, false);
+
+  return payload;
+}
+
+/**
+ * Encodes a Uint8Array to Base64 string.
+ * Works in both React Native (with btoa) and Node.js (with Buffer).
+ */
+function toBase64(bytes: Uint8Array): string {
+  let binary = '';
+  for (let i = 0; i < bytes.length; i++) {
+    binary += String.fromCharCode(bytes[i]);
+  }
+  return btoa(binary);
+}
+
 export class BleAdvertiser {
   private isAdvertising = false;
+  private capability: BleAdvertiseCapability = 'scan_only';
 
   constructor(
     private deviceId: string,
@@ -70,45 +141,73 @@ export class BleAdvertiser {
   /**
    * Starts BLE peripheral advertising via the native BleAdvertiserModule (Kotlin).
    *
-   * The native module (BleAdvertiserModule.kt) uses Android's BluetoothLeAdvertiser
-   * to broadcast the 25-byte manufacturer data payload with the disaster P2P service UUID.
+   * The native module implements a tiered advertising strategy:
+   *   1. BLE 5.0 Extended Advertising (full 27-byte payload)
+   *   2. Legacy BLE Advertising (trimmed 23-byte payload)
+   *   3. Scan-only mode (device cannot advertise)
    *
    * In non-native environments (Jest / Node.js), the NativeBleAdvertiser will be null
    * and advertising is simulated with a console log so tests can still run.
    *
    * Requires BLUETOOTH_ADVERTISE permission on Android 12+ (API 31+).
    */
-  async startAdvertising(): Promise<void> {
-    if (this.isAdvertising) return;
+  async startAdvertising(): Promise<BleAdvertiseCapability> {
+    if (this.isAdvertising) return this.capability;
 
-    const payloadBytes = this.getSerializedPayload();
-    let binary = '';
-    for (let i = 0; i < payloadBytes.length; i++) {
-      binary += String.fromCharCode(payloadBytes[i]);
-    }
-    const payloadBase64 = btoa(binary);
-    
-    // Sanitize display name to keep it alphanumeric and short to fit BLE limits (max 31 bytes total)
-    const sanitizedName = this.displayName.replace(/[^a-zA-Z0-9 ]/g, '').substring(0, 10);
-    const localName = `DP2P:${sanitizedName}:${this.deviceId.substring(0, 8)}`;
+    const nowSecs = Math.floor(Date.now() / 1000);
+    const fullPayload = packFullPayload(this.deviceId, this.role, this.publicKeyHash, nowSecs);
+    const trimmedPayload = packTrimmedPayload(this.deviceId, this.role, this.publicKeyHash, nowSecs);
+
+    const payloadFullBase64 = toBase64(fullPayload);
+    const payloadTrimmedBase64 = toBase64(trimmedPayload);
 
     if (!NativeBleAdvertiser) {
       // Non-native environment (e.g. Jest/Node.js test runner)
       this.isAdvertising = true;
+      this.capability = 'extended'; // Simulate best case
       console.log(
         `[BLE Advertiser] Advertising started (simulated). Role: ${this.role}, ID: ${this.deviceId}`
       );
-      return;
+      return this.capability;
     }
 
     try {
-      await NativeBleAdvertiser.startAdvertising(payloadBase64, localName);
-      this.isAdvertising = true;
-      console.log(
-        `[BLE Advertiser] Advertising started. Role: ${this.role}, ID: ${this.deviceId}`
+      const result: BleAdvertiseResult = await NativeBleAdvertiser.startAdvertising(
+        payloadFullBase64,
+        payloadTrimmedBase64
       );
-    } catch (error) {
+
+      this.capability = result.capability;
+
+      if (this.capability === 'scan_only') {
+        // Device cannot advertise — this is not an error, just a capability limitation.
+        // The device can still discover peers via scanning.
+        this.isAdvertising = false;
+        console.warn(
+          `[BLE Advertiser] Device does not support BLE advertising. Running in scan-only mode.`
+        );
+      } else {
+        this.isAdvertising = true;
+        console.log(
+          `[BLE Advertiser] Advertising started (${this.capability}). Role: ${this.role}, ID: ${this.deviceId}`
+        );
+      }
+
+      return this.capability;
+    } catch (error: any) {
       this.isAdvertising = false;
+      this.capability = 'scan_only';
+
+      // If DATA_TOO_LARGE on legacy, log actionable info instead of a generic error
+      if (error?.message === 'DATA_TOO_LARGE') {
+        console.error(
+          '[BLE Advertiser] DATA_TOO_LARGE: even the trimmed payload exceeds this device\'s advertising capacity. ' +
+          'This device will operate in scan-only mode.'
+        );
+        // Don't throw — degrade to scan-only
+        return 'scan_only';
+      }
+
       console.error('[BLE Advertiser] Failed to start advertising:', error);
       throw error;
     }
@@ -127,18 +226,21 @@ export class BleAdvertiser {
       console.warn('[BLE Advertiser] Error stopping advertising:', error);
     } finally {
       this.isAdvertising = false;
+      this.capability = 'scan_only';
       console.log('[BLE Advertiser] Advertising stopped.');
     }
   }
 
   /**
-   * Generates the serialized 25-byte advertising data payload.
+   * Returns the current advertising capability tier.
    */
-  getSerializedPayload(): Uint8Array {
-    const nowSecs = Math.floor(Date.now() / 1000);
-    return packAdvertisementPayload(this.deviceId, this.role, this.publicKeyHash, nowSecs);
+  getCapability(): BleAdvertiseCapability {
+    return this.capability;
   }
 
+  /**
+   * Returns whether the advertiser is currently active.
+   */
   status(): boolean {
     return this.isAdvertising;
   }

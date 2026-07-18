@@ -4,7 +4,8 @@ import { useDispatch } from 'react-redux';
 import { logout } from '../redux/slices/authSlice';
 import LokiJSAdapter from '@nozbe/watermelondb/adapters/lokijs';
 
-import { Platform, AppState, AppStateStatus } from 'react-native';
+import { Platform, AppState, AppStateStatus, PermissionsAndroid } from 'react-native';
+import * as Location from 'expo-location';
 import { secureStore as SecureStore } from '../utils/secureStore';
 
 import { localDbSchema, localDbMigrations } from '../db/schema';
@@ -160,6 +161,16 @@ export function useInitializeServices() {
           console.warn(`[P2P Cleanup] clearPersistentGroups failed:`, e);
         }
         await new Promise((resolve) => setTimeout(resolve, 500));
+
+        try {
+          const info = await AndroidWifiP2PTransport.getConnectionInfo();
+          if (!info.groupFormed) {
+             console.log(`[P2P Cleanup] No Wi-Fi Direct group formed, skipping removeGroup.`);
+             return;
+          }
+        } catch (e) {
+          console.warn(`[P2P Cleanup] Failed to check connection info:`, e);
+        }
 
         for (let attempt = 1; attempt <= 3; attempt++) {
           try {
@@ -430,6 +441,30 @@ export function useInitializeServices() {
           return;
         }
 
+        // --- Audit & Log Runtime Permissions ---
+        if (Platform.OS === 'android') {
+          try {
+            const androidVersion = parseInt(String(Platform.Version), 10);
+            if (androidVersion >= 31) {
+              const scanGranted = await PermissionsAndroid.check(PermissionsAndroid.PERMISSIONS.BLUETOOTH_SCAN);
+              const connectGranted = await PermissionsAndroid.check(PermissionsAndroid.PERMISSIONS.BLUETOOTH_CONNECT);
+              const advertiseGranted = await PermissionsAndroid.check(PermissionsAndroid.PERMISSIONS.BLUETOOTH_ADVERTISE);
+              console.log(`[P2P Bootstrap] Permission Audit (API 31+): SCAN=${scanGranted}, CONNECT=${connectGranted}, ADVERTISE=${advertiseGranted}`);
+            } else {
+              const locGranted = await PermissionsAndroid.check(PermissionsAndroid.PERMISSIONS.ACCESS_FINE_LOCATION);
+              console.log(`[P2P Bootstrap] Permission Audit (API <31): ACCESS_FINE_LOCATION=${locGranted}`);
+            }
+            
+            const locServicesEnabled = await Location.hasServicesEnabledAsync();
+            console.log(`[P2P Bootstrap] Location Services Enabled: ${locServicesEnabled}`);
+            if (!locServicesEnabled) {
+              console.warn('[P2P Bootstrap] Location Services are DISABLED. Android may silently drop BLE scan results!');
+            }
+          } catch (err) {
+            console.warn('[P2P Bootstrap] Failed to audit permissions / location services:', err);
+          }
+        }
+
         // Initialize BLE manager
         try {
           await initializeBleManager();
@@ -483,7 +518,7 @@ export function useInitializeServices() {
                 const secure = new SecureTransport(raw, privateKey, publicKey, deviceId, displayName);
                 const connKey = `owner-socket-${Date.now()}`;
                 const ownerEntry = setupPeerConnection(connKey, raw, secure, deviceId);
-                scheduleHandshakeRecovery();
+                ownerEntry.scheduleHandshakeRecovery();
                 // Store the MAC of the client that just connected (captured by lastTargetMacAddress
                 // on the other side). On the server side we don't know the client MAC until the
                 // handshake completes, so we store nothing here — that's fine; the connKey is
@@ -546,7 +581,7 @@ export function useInitializeServices() {
               const raw = new AndroidWifiP2PTransport(deviceId);
               const secure = new SecureTransport(raw, privateKey, publicKey, deviceId, displayName);
               const clientEntry = setupPeerConnection(finalKey, raw, secure, deviceId);
-              scheduleHandshakeRecovery();
+              clientEntry.scheduleHandshakeRecovery();
               // Populate the MAC address for proper disconnect-key cleanup
               if (lastTargetMacAddress) {
                 clientEntry.deviceAddress = lastTargetMacAddress;

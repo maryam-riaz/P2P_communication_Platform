@@ -3,42 +3,98 @@
  * 
  * Replaces polling with event-driven discovery.
  * Manages duty cycle: scan 2s, sleep 3s (~40% active).
- * Parses 25-byte manufacturer data packets without connecting to peripherals.
+ * Parses manufacturer data packets with magic-prefix validation
+ * instead of relying on a 128-bit Service UUID (which was removed
+ * from the advertising packet to stay within BLE legacy limits).
  */
 
-import { NativeEventEmitter, NativeModules, EventSubscription } from 'react-native';
-import type { BLEAdvertisementData, DiscoveredPeer } from './ble-types';
+import { EventSubscription } from 'react-native';
+import type { BLEAdvertisementData } from './ble-types';
+import {
+  DISASTER_P2P_MAGIC,
+  DISASTER_P2P_MANUFACTURER_ID,
+  AD_PAYLOAD_SIZE_FULL,
+  AD_PAYLOAD_SIZE_TRIMMED,
+} from './ble-types';
 import { logger } from '../../utils/Logger';
 
 import BleManager from 'react-native-ble-manager';
-
-const emitter = new NativeEventEmitter(NativeModules.BleManager);
-
-// App-specific BLE configuration
-const DISASTER_P2P_SERVICE_UUID = '550e8400-e29b-41d4-a716-446655440000';
-const DISASTER_P2P_MANUFACTURER_ID = 0x004c; // Apple's manufacturer ID for testing; use your own
-const SCAN_DURATION_MS = 2000;   // Scan for 2 seconds
-const SLEEP_DURATION_MS = 3000;  // Sleep for 3 seconds
-const AD_PACKET_SIZE = 25;       // Expected payload size
 
 let isScanning = false;
 let scanTimer: NodeJS.Timeout | null = null;
 let peripheralListener: EventSubscription | null = null;
 let stateListener: EventSubscription | null = null;
+let stopListener: EventSubscription | null = null;
 
 /**
- * Parse the 25-byte manufacturer data packet.
- * Expected format (from TRANSPORT.md):
- * - device_id (16 bytes) — hardware UUID
- * - role (1 byte) — 0=Victim, 1=Rescuer, 2=Admin
- * - public_key_hash (4 bytes) — first 4 bytes of SHA-256(pubkey)
- * - timestamp (4 bytes) — Unix seconds (big-endian)
+ * Parse a FULL 27-byte manufacturer data packet (from BLE 5.0 extended advertising).
+ *
+ * Format: [magic:2][device_id:16][role:1][pk_hash:4][timestamp:4]
+ */
+function parseFullPayload(bytes: Uint8Array): BLEAdvertisementData | null {
+  if (bytes.length !== AD_PAYLOAD_SIZE_FULL) return null;
+
+  const device_id = Buffer.from(bytes.slice(2, 18)).toString('hex');
+  const role = bytes[18];
+  const public_key_hash = Buffer.from(bytes.slice(19, 23)).toString('hex');
+  const timestamp = new DataView(bytes.buffer, bytes.byteOffset + 23, 4).getUint32(0, false);
+
+  const roles = ['victim', 'rescuer', 'admin'] as const;
+  return {
+    device_id,
+    role: roles[role] ?? 'unknown',
+    public_key_hash,
+    timestamp,
+    rssi: undefined,
+    payload_tier: 'full',
+  };
+}
+
+/**
+ * Parse a TRIMMED 23-byte manufacturer data packet (from legacy BLE advertising).
+ *
+ * Format: [magic:2][device_id:16][role:1][pk_hash:2][timestamp:2]
+ * - pk_hash is only the first 2 bytes (less precise, but verified later in handshake)
+ * - timestamp is minutes since midnight UTC (not absolute Unix seconds)
+ */
+function parseTrimmedPayload(bytes: Uint8Array): BLEAdvertisementData | null {
+  if (bytes.length !== AD_PAYLOAD_SIZE_TRIMMED) return null;
+
+  const device_id = Buffer.from(bytes.slice(2, 18)).toString('hex');
+  const role = bytes[18];
+  const public_key_hash = Buffer.from(bytes.slice(19, 21)).toString('hex');
+
+  // Convert minutes-since-midnight back to an approximate Unix timestamp
+  // (use today's midnight as the base — good enough for "is this peer recent?" checks)
+  const minutesSinceMidnight = new DataView(bytes.buffer, bytes.byteOffset + 21, 2).getUint16(0, false);
+  const todayMidnight = Math.floor(Date.now() / 86400000) * 86400;
+  const timestamp = todayMidnight + minutesSinceMidnight * 60;
+
+  const roles = ['victim', 'rescuer', 'admin'] as const;
+  return {
+    device_id,
+    role: roles[role] ?? 'unknown',
+    public_key_hash,
+    timestamp,
+    rssi: undefined,
+    payload_tier: 'trimmed',
+  };
+}
+
+/**
+ * Validates the magic prefix and dispatches to the correct payload parser.
+ *
+ * Returns null for:
+ * - Non-app packets (wrong magic prefix)
+ * - Unrecognized payload sizes
+ * - Parse errors
  */
 function parseAdvertisementPacket(data: string | Uint8Array | number[]): BLEAdvertisementData | null {
   try {
     let bytes: Uint8Array;
     if (typeof data === 'string') {
-      if (data.length === AD_PACKET_SIZE * 2) {
+      // Could be hex or base64 encoded
+      if (data.length === AD_PAYLOAD_SIZE_FULL * 2 || data.length === AD_PAYLOAD_SIZE_TRIMMED * 2) {
         bytes = new Uint8Array(data.match(/.{1,2}/g)!.map(b => parseInt(b, 16)));
       } else {
         bytes = new Uint8Array(Buffer.from(data, 'base64'));
@@ -49,24 +105,20 @@ function parseAdvertisementPacket(data: string | Uint8Array | number[]): BLEAdve
       bytes = new Uint8Array(data);
     }
 
-    if (bytes.length !== AD_PACKET_SIZE) {
-      logger.warn('BLE', `Invalid ad packet size: ${bytes.length}, expected ${AD_PACKET_SIZE}`);
-      return null;
+    // Validate magic prefix — if it doesn't match, this isn't our app's packet
+    if (bytes.length < 2 || bytes[0] !== DISASTER_P2P_MAGIC[0] || bytes[1] !== DISASTER_P2P_MAGIC[1]) {
+      return null; // Not our app — silently ignore
     }
 
-    const device_id = Buffer.from(bytes.slice(0, 16)).toString('hex');
-    const role = bytes[16];
-    const public_key_hash = Buffer.from(bytes.slice(17, 21)).toString('hex');
-    const timestamp = new DataView(bytes.buffer, 21, 4).getUint32(0, false);
+    // Dispatch to correct parser based on size
+    if (bytes.length === AD_PAYLOAD_SIZE_FULL) {
+      return parseFullPayload(bytes);
+    } else if (bytes.length === AD_PAYLOAD_SIZE_TRIMMED) {
+      return parseTrimmedPayload(bytes);
+    }
 
-    const roles = ['victim', 'rescuer', 'admin'];
-    return {
-      device_id,
-      role: (roles[role] as any) || 'unknown',
-      public_key_hash,
-      timestamp,
-      rssi: undefined,
-    };
+    // Unknown size — could be a future protocol version, ignore for now
+    return null;
   } catch (error) {
     logger.error('BLE', 'Error parsing advertisement packet', error instanceof Error ? error : new Error(String(error)));
     return null;
@@ -76,40 +128,48 @@ function parseAdvertisementPacket(data: string | Uint8Array | number[]): BLEAdve
 /**
  * Callback when a peripheral is discovered.
  * Extract manufacturer data without connecting.
+ *
+ * Since we no longer broadcast a service UUID (to save 18 bytes in the
+ * advertising packet), filtering is done via the magic prefix inside
+ * the manufacturer data payload instead.
  */
 function onDiscoverPeripheral(peripheral: any): void {
   try {
     const advertising = peripheral.advertising;
     if (!advertising) return;
 
-    // Optional fast filter if we use serviceUUIDs: []
-    const hasCorrectService = advertising.serviceUUIDs?.includes(DISASTER_P2P_SERVICE_UUID) || 
-                              advertising.serviceUUIDs?.includes(DISASTER_P2P_SERVICE_UUID.toLowerCase()) ||
-                              advertising.serviceUUIDs?.includes(DISASTER_P2P_SERVICE_UUID.toUpperCase());
-
-    // Extract manufacturer data (handles react-native-ble-manager object format)
+    // Extract manufacturer data using our specific manufacturer ID key
+    // react-native-ble-manager delivers manufacturerData as Record<string, CustomAdvertisingData>
+    // where the key is the 4-character hex string of the manufacturer ID (e.g., "ffff")
     let payloadBytes: number[] | undefined;
+    const mfgIdKey = DISASTER_P2P_MANUFACTURER_ID.toString(16).toLowerCase().padStart(4, '0');
     
     if (advertising.manufacturerRawData?.bytes) {
       payloadBytes = advertising.manufacturerRawData.bytes;
     } else if (advertising.manufacturerData) {
-      const keys = Object.keys(advertising.manufacturerData);
-      if (keys.length > 0 && advertising.manufacturerData[keys[0]]?.bytes) {
-        payloadBytes = advertising.manufacturerData[keys[0]].bytes;
-      } else if (Array.isArray(advertising.manufacturerData)) {
-        payloadBytes = advertising.manufacturerData;
+      // Try our specific manufacturer ID first
+      if (advertising.manufacturerData[mfgIdKey]?.bytes) {
+        payloadBytes = advertising.manufacturerData[mfgIdKey].bytes;
+      } else {
+        // Fallback: try first key (for compatibility)
+        const keys = Object.keys(advertising.manufacturerData);
+        if (keys.length > 0 && advertising.manufacturerData[keys[0]]?.bytes) {
+          payloadBytes = advertising.manufacturerData[keys[0]].bytes;
+        } else if (Array.isArray(advertising.manufacturerData)) {
+          payloadBytes = advertising.manufacturerData;
+        }
       }
     }
 
     if (!payloadBytes) {
-      // Not our packet, silently ignore to avoid log spam if we are scanning all
+      // No manufacturer data at all — not our peer
       return;
     }
 
-    // Parse the 25-byte payload
+    // Parse the payload (magic prefix validation happens inside parseAdvertisementPacket)
     const parsed = parseAdvertisementPacket(payloadBytes);
     if (!parsed) {
-      logger.warn('BLE', `Failed to parse payload from ${peripheral.id}`);
+      // Either wrong magic prefix (not our app) or unrecognized format — silently ignore
       return;
     }
 
@@ -120,7 +180,7 @@ function onDiscoverPeripheral(peripheral: any): void {
       name: peripheral.advertising?.localName,
     };
 
-    logger.info('BLE', `Peer: ${adData.device_id.slice(0, 8)} role=${adData.role} rssi=${adData.rssi}`);
+    logger.info('BLE', `Peer: ${adData.device_id.slice(0, 8)} role=${adData.role} rssi=${adData.rssi} tier=${adData.payload_tier}`);
 
     // Emit event for PeerRegistry to consume
     handleAdvertisementReceived(adData);
@@ -174,18 +234,34 @@ export async function startScanning(
     if (peripheralListener) {
       peripheralListener.remove();
     }
-    peripheralListener = emitter.addListener('BleManagerDiscoverPeripheral', onDiscoverPeripheral);
+    peripheralListener = BleManager.onDiscoverPeripheral((event: any) => onDiscoverPeripheral(event));
 
     // Subscribe to BLE state change events
     if (stateListener) {
       stateListener.remove();
     }
-    stateListener = emitter.addListener('BleManagerDidUpdateState', onBleStateChange);
+    stateListener = BleManager.onDidUpdateState((args: any) => onBleStateChange(args.state));
+
+    if (stopListener) {
+      stopListener.remove();
+    }
+    stopListener = BleManager.onStopScan((args: any) => {
+      // Decode numeric failure code if it's a failure (e.g., from Android's ScanCallback.onScanFailed)
+      if (args && args.status) {
+        const errorCodes: Record<number, string> = {
+          1: 'SCAN_FAILED_ALREADY_STARTED',
+          2: 'SCAN_FAILED_APPLICATION_REGISTRATION_FAILED',
+          3: 'SCAN_FAILED_INTERNAL_ERROR',
+          4: 'SCAN_FAILED_FEATURE_UNSUPPORTED',
+        };
+        logger.error('BLE', `Scan stopped with failure code: ${args.status} (${errorCodes[args.status] || 'UNKNOWN'})`);
+      }
+    });
 
     isScanning = true;
-    logger.info('BLE', 'Starting duty-cycled scan (2s on, 3s off)');
+    logger.info('BLE', 'Starting continuous scan session');
 
-    // Start the first scan cycle
+    // Start the continuous scan cycle
     await executeScanCycle();
   } catch (error) {
     logger.error('BLE', 'startScanning failed', error instanceof Error ? error : new Error(String(error)));
@@ -195,33 +271,27 @@ export async function startScanning(
 }
 
 /**
- * Execute one scan cycle and schedule the next.
+ * Execute one continuous scan cycle.
  */
 async function executeScanCycle(): Promise<void> {
   if (!isScanning) return;
 
   try {
-    // Scan for SCAN_DURATION_MS seconds
-    logger.debug('BLE', 'Starting scan cycle (2s)');
+    // Scan indefinitely (seconds: 0)
+    logger.debug('BLE', 'Starting continuous BLE scan');
     await BleManager.scan({
-      serviceUUIDs: [], // Scan all devices to bypass strict OS filtering bugs, we filter in JS
-      seconds: Math.ceil(SCAN_DURATION_MS / 1000),
+      serviceUUIDs: [], // Scan all devices — filtering is done via magic prefix in manufacturer data
+      seconds: 0,
       allowDuplicates: true, // We want continuous updates
       matchMode: 2, // MATCH_MODE_AGGRESSIVE
       scanMode: 1,  // SCAN_MODE_LOW_LATENCY
+      legacy: false, // Critical: Set to false to discover BLE 5.0 Extended Advertising packets!
     });
-
-    // Schedule the sleep and next cycle
-    scanTimer = setTimeout(async () => {
-      logger.debug('BLE', 'Scan cycle complete, sleeping for 3s');
-      // After sleep, execute next cycle
-      await executeScanCycle();
-    }, SLEEP_DURATION_MS);
   } catch (error) {
     logger.error('BLE', 'Error during scan cycle', error instanceof Error ? error : new Error(String(error)));
     if (isScanning) {
-      // Retry after a delay
-      scanTimer = setTimeout(executeScanCycle, 1000);
+      // Retry after a delay if it failed to start
+      scanTimer = setTimeout(executeScanCycle, 5000);
     }
   }
 }
@@ -255,6 +325,10 @@ export async function stopScanning(): Promise<void> {
     if (stateListener) {
       stateListener.remove();
       stateListener = null;
+    }
+    if (stopListener) {
+      stopListener.remove();
+      stopListener = null;
     }
 
     advertisementHandler = null;

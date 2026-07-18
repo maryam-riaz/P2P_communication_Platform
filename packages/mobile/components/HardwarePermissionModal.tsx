@@ -12,7 +12,7 @@ import {
   ActivityIndicator,
 } from 'react-native';
 import * as Location from 'expo-location';
-import { BleManager } from 'react-native-ble-plx';
+import { getBleState } from '../src/comms/ble/shared-ble-manager';
 
 // Dynamic import or fallback for native WifiDirect
 let WifiDirect: any = null;
@@ -29,9 +29,6 @@ export default function HardwarePermissionModal() {
   const [bluetoothEnabled, setBluetoothEnabled] = useState(true);
   const [locationEnabled, setLocationEnabled] = useState(true);
   const [checking, setChecking] = useState(true);
-
-  // Instantiated once and destroyed on unmount
-  const bleManagerRef = useRef<BleManager | null>(null);
 
   // Check Android permission statuses
   const checkPermissions = async (): Promise<boolean> => {
@@ -79,11 +76,8 @@ export default function HardwarePermissionModal() {
       setLocationEnabled(!!locResult);
 
       // 4. Check Bluetooth
-      if (!bleManagerRef.current) {
-        bleManagerRef.current = new BleManager();
-      }
-      const btState = await bleManagerRef.current.state();
-      setBluetoothEnabled(btState === 'PoweredOn');
+      const btState = await getBleState();
+      setBluetoothEnabled(btState === 'on');
 
     } catch (err) {
       console.error('[HardwarePermissionModal] Check execution error:', err);
@@ -110,10 +104,6 @@ export default function HardwarePermissionModal() {
     return () => {
       appStateSubscription.remove();
       clearInterval(intervalId);
-      if (bleManagerRef.current) {
-        bleManagerRef.current.destroy();
-        bleManagerRef.current = null;
-      }
     };
   }, []);
 

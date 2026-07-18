@@ -13,7 +13,7 @@ import { RootState } from '../../redux/store';
 import { setUserLocation, setNearbyUsers, setNearbyRescuers } from '../../redux/slices/mapSlice';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import * as Location from 'expo-location';
-import { sharedBleManager } from '../../comms/ble/shared-ble-manager';
+import { getBleState } from '../../comms/ble/shared-ble-manager';
 import { useService } from '../../hooks/useService';
 import { MapService, PeerPin } from '../../services/MapService';
 import { SosService } from '../../services/SosService';
@@ -241,8 +241,8 @@ export default function MapScreen({ navigation }: any) {
 
     const checkBluetooth = async () => {
       try {
-        const state = await sharedBleManager.state();
-        if (isMounted) setBluetoothEnabled(state === 'PoweredOn');
+        const state = await getBleState();
+        if (isMounted) setBluetoothEnabled(state === 'on');
       } catch (e) {
         // Fallback
       }

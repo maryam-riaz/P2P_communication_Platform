@@ -27,7 +27,7 @@ export async function initializeBleManager(): Promise<void> {
  */
 export async function isBleEnabled(): Promise<boolean> {
   try {
-    const state = await BleManager.getState();
+    const state = await BleManager.checkState();
     // state can be 'on', 'off', 'unknown', 'resetting'
     return state === 'on';
   } catch (error) {
@@ -41,7 +41,7 @@ export async function isBleEnabled(): Promise<boolean> {
  */
 export async function getBleState(): Promise<string> {
   try {
-    return await BleManager.getState();
+    return await BleManager.checkState();
   } catch (error) {
     console.error('[BLE] Error getting BLE state:', error);
     return 'unknown';
