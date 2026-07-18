@@ -189,14 +189,18 @@ function onDiscoverPeripheral(peripheral: any): void {
 /**
  * Callback when BLE state changes.
  */
+let lastKnownState: string | null = null;
 function onBleStateChange(state: string): void {
   logger.info('BLE', `State changed: ${state}`);
   if (state === 'off') {
+    lastKnownState = 'off';
     logger.warn('BLE', 'Bluetooth turned off');
     stopScanning();
   } else if (state === 'on') {
+    const wasOff = lastKnownState === 'off';
+    lastKnownState = 'on';
     logger.info('BLE', 'Bluetooth turned on');
-    if (isScanning) {
+    if (wasOff && isScanning && !cycleInFlight) {
       if (scanTimer) clearTimeout(scanTimer);
       executeScanCycle();
     }
@@ -249,6 +253,10 @@ export async function startScanning(
     stopListener = BleManager.onStopScan((args: any) => {
       // Decode numeric failure code if it's a failure (e.g., from Android's ScanCallback.onScanFailed)
       if (args && args.status) {
+        if (args.status === 10) {
+          // Status 10 means the scan stopped normally (e.g., timeout or our manual stop)
+          return;
+        }
         const errorCodes: Record<number, string> = {
           1: 'SCAN_FAILED_ALREADY_STARTED',
           2: 'SCAN_FAILED_APPLICATION_REGISTRATION_FAILED',
@@ -274,17 +282,20 @@ export async function startScanning(
 /**
  * Execute one continuous scan cycle.
  */
-const SCAN_ACTIVE_MS = 2000;
-const SCAN_SLEEP_MS = 3000;
+const SCAN_ACTIVE_MS = 4000;
+const SCAN_SLEEP_MS = 8000;
+
+let cycleInFlight = false;
 
 async function executeScanCycle(): Promise<void> {
-  if (!isScanning) return;
+  if (!isScanning || cycleInFlight) return;
+  cycleInFlight = true;
 
   try {
     logger.debug('BLE', 'Starting BLE scan cycle (active)');
     await BleManager.scan({
       serviceUUIDs: [], // Scan all devices — filtering is done via magic prefix in manufacturer data
-      seconds: SCAN_ACTIVE_MS / 1000,
+      seconds: 0,       // don't let native auto-stop; we control timing ourselves
       allowDuplicates: true, // We want continuous updates
       matchMode: 2, // MATCH_MODE_AGGRESSIVE
       scanMode: 2,  // SCAN_MODE_BALANCED
@@ -308,6 +319,8 @@ async function executeScanCycle(): Promise<void> {
       // Retry after a delay if it failed to start
       scanTimer = setTimeout(executeScanCycle, 5000);
     }
+  } finally {
+    cycleInFlight = false;
   }
 }
 

@@ -40,22 +40,22 @@ The system utilizes a hybrid multi-radio protocol stack to support communication
 
 ### Discovery Power Management
 Constant BLE scanning quickly drains mobile batteries. The system implements a **duty-cycled scanning schedule** to balance discovery latency and power consumption:
-- **Scan Interval**: 5 seconds.
-- **Scan Window**: 2 seconds.
-- **Result**: The BLE chip is active only 40% of the time during standby, reducing power usage by ~60%.
+- **Scan Interval**: 12 seconds.
+- **Scan Window**: 4 seconds.
+- **Result**: The BLE chip is active only ~33% of the time during standby, avoiding Android OS throttles and reducing power usage.
 
 ---
 
-## 3. BLE Advertisement Packet Format (25 Bytes)
+## 3. BLE Advertisement Packet Format (23 Bytes)
 
-The custom 25-byte manufacturer data payload is packed as follows:
+The custom manufacturer data payload is packed as follows. To maximize compatibility, a **21-byte trimmed version** is broadcasted on legacy BLE devices (where `public_key_hash` is reduced to 2 bytes).
 
 | Field | Size (Bytes) | Description |
 |---|---|---|
+| `magic_prefix` | 2 | App identification marker (`0xD2 0x50`). |
 | `device_id` | 16 | The hardware UUID of the local peer. |
 | `role` | 1 | Enum value (`0` = Victim, `1` = Rescuer, `2` = Admin). |
-| `public_key_hash` | 4 | First 4 bytes of SHA-256 hash of the public key (filtering). |
-| `timestamp` | 4 | Current Unix timestamp in seconds (big-endian). |
+| `public_key_hash` | 4 | First 4 bytes of SHA-256 hash of the public key (2 bytes in trimmed mode). |
 
 ---
 
