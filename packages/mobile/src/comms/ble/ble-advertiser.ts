@@ -3,6 +3,7 @@ import {
   DISASTER_P2P_MAGIC,
   AD_PAYLOAD_SIZE_FULL,
   AD_PAYLOAD_SIZE_TRIMMED,
+  BLE_ROLE_BYTE_MAP,
   type UserRole,
   type BleAdvertiseResult,
   type BleAdvertiseCapability,
@@ -33,13 +34,11 @@ export function uuidToBytes(uuid: string): Uint8Array {
  * - device_id:     16 bytes (UUID)
  * - role:           1 byte  (0 = victim, 1 = rescuer, 2 = admin)
  * - public_key_hash: 4 bytes (first 4 bytes of SHA-256(pubkey))
- * - timestamp:      4 bytes (Unix epoch seconds, big-endian)
  */
 export function packFullPayload(
   deviceId: string,
   role: UserRole,
-  publicKeyHashHex: string,
-  timestampSeconds: number
+  publicKeyHashHex: string
 ): Uint8Array {
   const payload = new Uint8Array(AD_PAYLOAD_SIZE_FULL);
 
@@ -52,18 +51,14 @@ export function packFullPayload(
   payload.set(uuidBytes, 2);
 
   // 3. Role (1 byte)
-  const roleVal = role === 'user' ? 0 : role === 'responder' ? 1 : 2;
-  payload[18] = roleVal;
+  const idx = BLE_ROLE_BYTE_MAP.indexOf(role);
+  payload[18] = idx !== -1 ? idx : 2;
 
   // 4. Public Key Hash (4 bytes)
   const pkHex = publicKeyHashHex.padStart(8, '0');
   for (let i = 0; i < 4; i++) {
     payload[19 + i] = parseInt(pkHex.substring(i * 2, i * 2 + 2), 16);
   }
-
-  // 5. Timestamp (4 bytes, big-endian)
-  const view = new DataView(payload.buffer, payload.byteOffset, payload.byteLength);
-  view.setUint32(23, timestampSeconds, false);
 
   return payload;
 }
@@ -79,13 +74,11 @@ export function packFullPayload(
  * - device_id:     16 bytes (UUID)
  * - role:           1 byte  (0 = victim, 1 = rescuer, 2 = admin)
  * - public_key_hash: 2 bytes (first 2 bytes of SHA-256(pubkey))
- * - timestamp:      2 bytes (minutes since midnight UTC, wraps daily)
  */
 export function packTrimmedPayload(
   deviceId: string,
   role: UserRole,
-  publicKeyHashHex: string,
-  timestampSeconds: number
+  publicKeyHashHex: string
 ): Uint8Array {
   const payload = new Uint8Array(AD_PAYLOAD_SIZE_TRIMMED);
 
@@ -98,19 +91,14 @@ export function packTrimmedPayload(
   payload.set(uuidBytes, 2);
 
   // 3. Role (1 byte)
-  const roleVal = role === 'user' ? 0 : role === 'responder' ? 1 : 2;
-  payload[18] = roleVal;
+  const idx = BLE_ROLE_BYTE_MAP.indexOf(role);
+  payload[18] = idx !== -1 ? idx : 2;
 
   // 4. Public Key Hash — truncated to 2 bytes
   const pkHex = publicKeyHashHex.padStart(8, '0');
   for (let i = 0; i < 2; i++) {
     payload[19 + i] = parseInt(pkHex.substring(i * 2, i * 2 + 2), 16);
   }
-
-  // 5. Timestamp — minutes since midnight UTC (2 bytes, big-endian, wraps at 1440)
-  const minutesSinceMidnight = Math.floor(timestampSeconds % 86400 / 60);
-  const trimmedView = new DataView(payload.buffer, payload.byteOffset, payload.byteLength);
-  trimmedView.setUint16(21, minutesSinceMidnight, false);
 
   return payload;
 }
@@ -154,9 +142,8 @@ export class BleAdvertiser {
   async startAdvertising(): Promise<BleAdvertiseCapability> {
     if (this.isAdvertising) return this.capability;
 
-    const nowSecs = Math.floor(Date.now() / 1000);
-    const fullPayload = packFullPayload(this.deviceId, this.role, this.publicKeyHash, nowSecs);
-    const trimmedPayload = packTrimmedPayload(this.deviceId, this.role, this.publicKeyHash, nowSecs);
+    const fullPayload = packFullPayload(this.deviceId, this.role, this.publicKeyHash);
+    const trimmedPayload = packTrimmedPayload(this.deviceId, this.role, this.publicKeyHash);
 
     const payloadFullBase64 = toBase64(fullPayload);
     const payloadTrimmedBase64 = toBase64(trimmedPayload);

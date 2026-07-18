@@ -65,7 +65,7 @@ export async function requestBlePermissions(): Promise<boolean> {
  * Some low-end Android devices do not support acting as a BLE peripheral.
  */
 export function isBleAdvertisingSupported(): boolean {
-  // react-native-ble-plx checks this at the native level.
+  // react-native-ble-manager checks this at the native level.
   // On Android, BluetoothAdapter.isMultipleAdvertisementSupported() must return true.
   // This is a best-effort check; the real check happens in BleAdvertiser.startAdvertising().
   return Platform.OS === 'android' || Platform.OS === 'ios';

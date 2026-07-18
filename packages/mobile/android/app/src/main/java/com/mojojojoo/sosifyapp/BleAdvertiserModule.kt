@@ -62,8 +62,8 @@ class BleAdvertiserModule(private val reactContext: ReactApplicationContext) :
      * Starts BLE peripheral advertising with the given manufacturer data payload.
      *
      * The payload is provided in two sizes from the JS layer:
-     * - payloadFullBase64:    Full payload (27 bytes): [magic:2][device_id:16][role:1][pk_hash:4][timestamp:4]
-     * - payloadTrimmedBase64: Trimmed payload (23 bytes): [magic:2][device_id:16][role:1][pk_hash:2][timestamp:2]
+     * - payloadFullBase64:    Full payload (23 bytes): [magic:2][device_id:16][role:1][pk_hash:4]
+     * - payloadTrimmedBase64: Trimmed payload (21 bytes): [magic:2][device_id:16][role:1][pk_hash:2]
      *
      * The module selects the appropriate payload size based on hardware capability:
      * - BLE 5.0 Extended → full payload (no size concern)
@@ -72,8 +72,8 @@ class BleAdvertiserModule(private val reactContext: ReactApplicationContext) :
      * Resolves with a WritableMap containing:
      *   { capability: "extended" | "legacy" | "trimmed" | "scan_only" }
      *
-     * @param payloadFullBase64    Base64-encoded full payload (27 bytes with magic prefix)
-     * @param payloadTrimmedBase64 Base64-encoded trimmed payload (23 bytes with magic prefix)
+     * @param payloadFullBase64    Base64-encoded full payload (23 bytes with magic prefix)
+     * @param payloadTrimmedBase64 Base64-encoded trimmed payload (21 bytes with magic prefix)
      * @param promise              Resolves with capability info, rejects on unrecoverable failure
      */
     @ReactMethod
@@ -142,7 +142,7 @@ class BleAdvertiserModule(private val reactContext: ReactApplicationContext) :
     /**
      * Attempts BLE 5.0 Extended Advertising with the full-size payload.
      * Extended advertising supports payloads up to 1650 bytes, so the full
-     * 27-byte payload fits with enormous margin.
+     * 23-byte payload fits with enormous margin.
      */
     private fun tryExtendedAdvertising(
         bluetoothAdapter: BluetoothAdapter,
@@ -223,7 +223,7 @@ class BleAdvertiserModule(private val reactContext: ReactApplicationContext) :
      *   - N bytes: Manufacturer data payload
      *   Total overhead: 7 bytes → max payload = 24 bytes
      *
-     * The trimmed payload is 23 bytes → total packet = 30/31 bytes (1 byte margin).
+     * The trimmed payload is 21 bytes → total packet = 28/31 bytes (3 bytes margin).
      *
      * If advertising fails with DATA_TOO_LARGE, the caller should retry with
      * an even smaller payload.

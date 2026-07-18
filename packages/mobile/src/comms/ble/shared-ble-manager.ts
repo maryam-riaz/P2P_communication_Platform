@@ -1,7 +1,5 @@
 /**
  * Shared BLE Manager initialization
- * 
- * Replaces react-native-ble-plx with react-native-ble-manager.
  * Handles initialization of the native BLE module.
  */
 

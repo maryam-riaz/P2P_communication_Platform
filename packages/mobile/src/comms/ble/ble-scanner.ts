@@ -15,6 +15,7 @@ import {
   DISASTER_P2P_MANUFACTURER_ID,
   AD_PAYLOAD_SIZE_FULL,
   AD_PAYLOAD_SIZE_TRIMMED,
+  BLE_ROLE_BYTE_MAP,
 } from './ble-types';
 import { logger } from '../../utils/Logger';
 
@@ -25,11 +26,12 @@ let scanTimer: NodeJS.Timeout | null = null;
 let peripheralListener: EventSubscription | null = null;
 let stateListener: EventSubscription | null = null;
 let stopListener: EventSubscription | null = null;
+const lastProcessedAtMs = new Map<string, number>();
 
 /**
  * Parse a FULL 27-byte manufacturer data packet (from BLE 5.0 extended advertising).
  *
- * Format: [magic:2][device_id:16][role:1][pk_hash:4][timestamp:4]
+ * Format: [magic:2][device_id:16][role:1][pk_hash:4]
  */
 function parseFullPayload(bytes: Uint8Array): BLEAdvertisementData | null {
   if (bytes.length !== AD_PAYLOAD_SIZE_FULL) return null;
@@ -37,14 +39,11 @@ function parseFullPayload(bytes: Uint8Array): BLEAdvertisementData | null {
   const device_id = Buffer.from(bytes.slice(2, 18)).toString('hex');
   const role = bytes[18];
   const public_key_hash = Buffer.from(bytes.slice(19, 23)).toString('hex');
-  const timestamp = new DataView(bytes.buffer, bytes.byteOffset + 23, 4).getUint32(0, false);
 
-  const roles = ['victim', 'rescuer', 'admin'] as const;
   return {
     device_id,
-    role: roles[role] ?? 'unknown',
+    role: BLE_ROLE_BYTE_MAP[role] ?? 'unknown',
     public_key_hash,
-    timestamp,
     rssi: undefined,
     payload_tier: 'full',
   };
@@ -53,9 +52,8 @@ function parseFullPayload(bytes: Uint8Array): BLEAdvertisementData | null {
 /**
  * Parse a TRIMMED 23-byte manufacturer data packet (from legacy BLE advertising).
  *
- * Format: [magic:2][device_id:16][role:1][pk_hash:2][timestamp:2]
+ * Format: [magic:2][device_id:16][role:1][pk_hash:2]
  * - pk_hash is only the first 2 bytes (less precise, but verified later in handshake)
- * - timestamp is minutes since midnight UTC (not absolute Unix seconds)
  */
 function parseTrimmedPayload(bytes: Uint8Array): BLEAdvertisementData | null {
   if (bytes.length !== AD_PAYLOAD_SIZE_TRIMMED) return null;
@@ -64,18 +62,10 @@ function parseTrimmedPayload(bytes: Uint8Array): BLEAdvertisementData | null {
   const role = bytes[18];
   const public_key_hash = Buffer.from(bytes.slice(19, 21)).toString('hex');
 
-  // Convert minutes-since-midnight back to an approximate Unix timestamp
-  // (use today's midnight as the base — good enough for "is this peer recent?" checks)
-  const minutesSinceMidnight = new DataView(bytes.buffer, bytes.byteOffset + 21, 2).getUint16(0, false);
-  const todayMidnight = Math.floor(Date.now() / 86400000) * 86400;
-  const timestamp = todayMidnight + minutesSinceMidnight * 60;
-
-  const roles = ['victim', 'rescuer', 'admin'] as const;
   return {
     device_id,
-    role: roles[role] ?? 'unknown',
+    role: BLE_ROLE_BYTE_MAP[role] ?? 'unknown',
     public_key_hash,
-    timestamp,
     rssi: undefined,
     payload_tier: 'trimmed',
   };
@@ -89,7 +79,7 @@ function parseTrimmedPayload(bytes: Uint8Array): BLEAdvertisementData | null {
  * - Unrecognized payload sizes
  * - Parse errors
  */
-function parseAdvertisementPacket(data: string | Uint8Array | number[]): BLEAdvertisementData | null {
+export function parseAdvertisementPacket(data: string | Uint8Array | number[]): BLEAdvertisementData | null {
   try {
     let bytes: Uint8Array;
     if (typeof data === 'string') {
@@ -173,6 +163,13 @@ function onDiscoverPeripheral(peripheral: any): void {
       return;
     }
 
+    const now = Date.now();
+    const lastProcessed = lastProcessedAtMs.get(parsed.device_id) || 0;
+    if (now - lastProcessed < 1000) {
+      return;
+    }
+    lastProcessedAtMs.set(parsed.device_id, now);
+
     // Add RSSI and name for logging
     const adData: BLEAdvertisementData = {
       ...parsed,
@@ -193,12 +190,16 @@ function onDiscoverPeripheral(peripheral: any): void {
  * Callback when BLE state changes.
  */
 function onBleStateChange(state: string): void {
-  console.log('[BLE] State changed:', state);
+  logger.info('BLE', `State changed: ${state}`);
   if (state === 'off') {
-    console.warn('[BLE] Bluetooth turned off');
+    logger.warn('BLE', 'Bluetooth turned off');
     stopScanning();
   } else if (state === 'on') {
-    console.log('[BLE] Bluetooth turned on');
+    logger.info('BLE', 'Bluetooth turned on');
+    if (isScanning) {
+      if (scanTimer) clearTimeout(scanTimer);
+      executeScanCycle();
+    }
   }
 }
 
@@ -273,20 +274,34 @@ export async function startScanning(
 /**
  * Execute one continuous scan cycle.
  */
+const SCAN_ACTIVE_MS = 2000;
+const SCAN_SLEEP_MS = 3000;
+
 async function executeScanCycle(): Promise<void> {
   if (!isScanning) return;
 
   try {
-    // Scan indefinitely (seconds: 0)
-    logger.debug('BLE', 'Starting continuous BLE scan');
+    logger.debug('BLE', 'Starting BLE scan cycle (active)');
     await BleManager.scan({
       serviceUUIDs: [], // Scan all devices — filtering is done via magic prefix in manufacturer data
-      seconds: 0,
+      seconds: SCAN_ACTIVE_MS / 1000,
       allowDuplicates: true, // We want continuous updates
       matchMode: 2, // MATCH_MODE_AGGRESSIVE
-      scanMode: 1,  // SCAN_MODE_LOW_LATENCY
+      scanMode: 2,  // SCAN_MODE_BALANCED
       legacy: false, // Critical: Set to false to discover BLE 5.0 Extended Advertising packets!
     });
+
+    await new Promise(resolve => { scanTimer = setTimeout(resolve, SCAN_ACTIVE_MS); });
+    
+    if (!isScanning) return;
+    await BleManager.stopScan().catch(() => {});
+    
+    if (!isScanning) return;
+    logger.debug('BLE', 'Sleeping BLE scan cycle (idle)');
+    await new Promise(resolve => { scanTimer = setTimeout(resolve, SCAN_SLEEP_MS); });
+
+    if (!isScanning) return;
+    scanTimer = setTimeout(executeScanCycle, 0);
   } catch (error) {
     logger.error('BLE', 'Error during scan cycle', error instanceof Error ? error : new Error(String(error)));
     if (isScanning) {

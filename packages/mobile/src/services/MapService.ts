@@ -33,10 +33,17 @@ export class MapService {
     this.chatService = chatService;
   }
 
+  private lastRssiEmitMs = 0;
+
   updatePeerRssi(deviceId: string, rssi: number): void {
     this.peerRssiMap.set(deviceId, rssi);
     this.peerLastSeenMap.set(deviceId, Date.now());
-    this.rssiUpdateSubject.next();
+    
+    const now = Date.now();
+    if (now - this.lastRssiEmitMs >= 500) {
+      this.lastRssiEmitMs = now;
+      this.rssiUpdateSubject.next();
+    }
   }
 
   getPeerRssi(deviceId: string): number {
