@@ -3,37 +3,38 @@ import { Database, Q } from '@nozbe/watermelondb';
 import { useDispatch } from 'react-redux';
 import { logout } from '../redux/slices/authSlice';
 import LokiJSAdapter from '@nozbe/watermelondb/adapters/lokijs';
- 
+
 import { Platform, AppState, AppStateStatus } from 'react-native';
 import { secureStore as SecureStore } from '../utils/secureStore';
- 
+
 import { localDbSchema, localDbMigrations } from '../db/schema';
 import { LocalUser, KnownPeer, Message, SosEvent, LocationLog, SyncQueue } from '../db/models';
 import { MobileRepository } from '../db/repository';
- 
-import { BleScanner } from '../comms/ble/ble-scanner';
+
+import { startScanning, stopScanning, cleanupBleScanner } from '../comms/ble/ble-scanner';
+import { initializeBleManager } from '../comms/ble/shared-ble-manager';
+import { PeerRegistry } from '../services/PeerRegistry';
 import { BleAdvertiser } from '../comms/ble/ble-advertiser';
 import { requestBlePermissions } from '../comms/ble/ble-permission-helper';
 import { AndroidWifiP2PTransport } from '../comms/wifi-direct/wifi-p2p-transport.android';
 import { SecureTransport } from '../comms/secure-transport';
- 
+
 import { AuthService } from '../services/AuthService';
 import { ChatService } from '../services/ChatService';
 import { MapService } from '../services/MapService';
 import { SosService } from '../services/SosService';
- 
+
 export interface Services {
   authService: AuthService;
   chatService: ChatService;
   mapService: MapService;
   sosService: SosService;
   database: Database;
-  bleScanner?: BleScanner;
   bleAdvertiser?: BleAdvertiser;
   initTransportsForUser: (user: LocalUser) => Promise<void>;
   shutdownTransports: () => Promise<void>;
 }
- 
+
 /**
  * One physical Wi-Fi Direct socket + its secure channel wrapper.
  * Before the handshake completes we only know the peer by its Wi-Fi Direct
@@ -49,20 +50,20 @@ interface PeerConnection {
   scheduleHandshakeRecovery: () => void;
   clearHandshakeRecovery: () => void;
 }
- 
+
 export function useInitializeServices() {
   const [services, setServices] = useState<Services | null>(null);
   const dispatch = useDispatch();
- 
+
   useEffect(() => {
     let db: Database;
- 
+
     const initAsync = async () => {
       // SQLiteAdapter requires the WMDatabaseBridge native module compiled into the app binary.
       // In Expo Go this native module is absent, so we fall back to the pure-JS LokiJS adapter.
       const { NativeModules } = require('react-native');
       const hasNativeSQLite = !!NativeModules.WMDatabaseBridge;
- 
+
       let adapter;
       if (!hasNativeSQLite || Platform.OS === 'web' || process.env.NODE_ENV === 'test') {
         adapter = new LokiJSAdapter({
@@ -79,32 +80,31 @@ export function useInitializeServices() {
           onSetUpError: (error: any) => console.error('WatermelonDB SQLite setup failed:', error),
         });
       }
- 
+
       db = new Database({
         adapter,
         modelClasses: [LocalUser, KnownPeer, Message, SosEvent, LocationLog, SyncQueue],
       });
- 
+
       // 2. Initialize Services
       const authService = new AuthService(db);
       const chatService = new ChatService(db);
       const mapService = new MapService(db);
       const sosService = new SosService(db, chatService);
- 
+
       // Link ChatService to MapService for location sharing
       mapService.setChatService(chatService);
- 
+
       // Initialize Wifi Direct static layer at startup
       AndroidWifiP2PTransport.initialize().catch((err) => {
         console.warn('[P2P Bootstrap] Failed to initialize static Wi-Fi Direct:', err);
       });
- 
+
       // Context state holders for dynamic P2P setup
       let currentAdvertiser: BleAdvertiser | undefined;
-      let currentScanner: BleScanner | undefined;
       let unsubConnectionInfo: (() => void) | null = null;
       let unsubPeersChanged: (() => void) | null = null;
- 
+
       // â”€â”€ Multi-peer connection pools â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
       // Every connected/connecting peer gets its own PeerConnection, keyed by
       // Wi-Fi Direct MAC address first, then mirrored by deviceId once the
@@ -115,7 +115,7 @@ export function useInitializeServices() {
       // as "ignore everyone else," so device C's handshake never started.
       const connectionsByKey = new Map<string, PeerConnection>();
       const connectingKeys = new Set<string>();
- 
+
       // A device can only be a *client* of one Wi-Fi Direct group at a time
       // (an OS-level constraint, not a bug) â€” but if it's the *group owner*,
       // more devices can still join that same group. Track which role we're
@@ -137,7 +137,7 @@ export function useInitializeServices() {
       // where onPeersChanged never fires because the two devices weren't in the
       // same discovery window simultaneously.
       let discoveryRetryTimer: ReturnType<typeof setInterval> | null = null;
- 
+
       /**
        * Wires up a raw transport + its SecureTransport wrapper with all the
        * message/handshake/disconnect handling that used to live inline
@@ -153,14 +153,14 @@ export function useInitializeServices() {
           console.warn(`[P2P Cleanup] cancelConnect failed:`, e);
         }
         await new Promise((resolve) => setTimeout(resolve, 500));
-        
+
         try {
           await AndroidWifiP2PTransport.clearPersistentGroups();
         } catch (e) {
           console.warn(`[P2P Cleanup] clearPersistentGroups failed:`, e);
         }
         await new Promise((resolve) => setTimeout(resolve, 500));
-        
+
         for (let attempt = 1; attempt <= 3; attempt++) {
           try {
             await AndroidWifiP2PTransport.removeGroup();
@@ -211,17 +211,17 @@ export function useInitializeServices() {
         };
         connectionsByKey.set(connKey, entry);
         chatService.registerSecureTransport(secure);
- 
+
         secure.receive(async (plaintext) => {
           console.log(`[P2P Connection][${connKey}] Encrypted payload successfully decrypted:`, plaintext);
           try {
             const payload = JSON.parse(plaintext);
- 
+
             const remoteId = secure.getRemoteDeviceId();
             if (remoteId) {
               chatService.updateTransportActivity(remoteId);
             }
- 
+
             // â”€â”€ Hub Relay Logic â”€â”€
             // If the message is a chat or ack directed at another device, or is a broadcast type (location_share, sos),
             // and we are the group owner (so we have other active transports), we act as a relay hub.
@@ -302,7 +302,7 @@ export function useInitializeServices() {
             console.error('Error handling incoming secure packet payload:', err);
           }
         });
- 
+
         secure.onHandshakeReady(async () => {
           clearHandshakeRecovery();
           const remoteId = secure.getRemoteDeviceId();
@@ -316,7 +316,7 @@ export function useInitializeServices() {
             if (groupRole === 'client') {
               connectingKeys.clear();
             }
- 
+
             const peersRepo = new MobileRepository(db);
             await peersRepo.addNewPeer({
               deviceId: remoteId,
@@ -325,7 +325,7 @@ export function useInitializeServices() {
               trustStatus: 'trusted',
               displayName: remoteName || undefined
             });
- 
+
             try {
               const latestLoc = await db.get<LocationLog>('location_log')
                 .query(
@@ -333,7 +333,7 @@ export function useInitializeServices() {
                   Q.sortBy('timestamp', Q.desc),
                   Q.take(1)
                 ).fetch();
- 
+
               if (latestLoc.length > 0) {
                 const loc = latestLoc[0]._raw as any;
                 const payload = {
@@ -351,7 +351,7 @@ export function useInitializeServices() {
             }
           }
         });
- 
+
         raw.onDisconnect(() => {
           clearHandshakeRecovery();
           const remoteId = entry.deviceId ?? secure.getRemoteDeviceId();
@@ -393,10 +393,10 @@ export function useInitializeServices() {
             console.warn('[P2P DEBUG] Re-discovery after disconnect failed:', err)
           );
         });
- 
+
         return entry;
       };
- 
+
       /**
        * Dynamic initialization of BLE and Wi-Fi Direct transports once identity is loaded.
        */
@@ -405,41 +405,48 @@ export function useInitializeServices() {
         const role = (user._raw as any).role as any;
         const publicKey = (user._raw as any).public_key as string;
         const privateKey = await SecureStore.getItemAsync(`private_key_${deviceId}`);
- 
+
         if (!privateKey) {
           console.warn('Private key not found in SecureStore. Session corrupted, logging out.');
           await authService.logout();
           dispatch(logout());
           return;
         }
- 
+
         console.log(`[P2P Bootstrap] Initializing transports for user: ${deviceId}`);
- 
+
         // Reset per-session state
         connectingKeys.clear();
         groupRole = 'unassigned';
         serverSocketBound = false;
- 
+
         // TDOWN: Always remove/disconnect any pre-existing native Wi-Fi Direct groups first!
         await performP2PCleanup('Bootstrap');
- 
+
         // Request Bluetooth permissions before starting advertising/scanning
         const permissionsGranted = await requestBlePermissions();
         if (!permissionsGranted) {
           console.warn('[P2P Bootstrap] Bluetooth permissions not granted. Cannot start advertising or scanning.');
           return;
         }
- 
+
+        // Initialize BLE manager
+        try {
+          await initializeBleManager();
+        } catch (e) {
+          console.warn('[P2P Bootstrap] BleManager init failed:', e);
+        }
+
         // Stop any old transports
         if (currentAdvertiser) await currentAdvertiser.stopAdvertising();
-        if (currentScanner) currentScanner.stopScanning();
+        await stopScanning();
         for (const entry of Array.from(connectionsByKey.values())) {
-          await entry.raw.disconnect().catch(() => {});
+          await entry.raw.disconnect().catch(() => { });
         }
         connectionsByKey.clear();
- 
+
         const displayName = (user._raw as any).display_name || 'Peer';
- 
+
         // Instantiate Phase 2 BLE scanning & advertising
         const pubKeyHash = publicKey.slice(0, 8); // 4-byte hash (8 hex chars)
         currentAdvertiser = new BleAdvertiser(deviceId, role, pubKeyHash, displayName);
@@ -448,14 +455,14 @@ export function useInitializeServices() {
         } catch (err) {
           console.warn('[P2P Bootstrap] Failed to start BLE advertising (check if Bluetooth is enabled):', err);
         }
- 
+
         // ── Wire up Wi-Fi Direct Group formation listeners ──
         const handleConnectionInfo = async (info: any) => {
           console.log('[P2P DEBUG] Connection Info Event received:', info);
           if (info.groupFormed) {
             let ownerAddress = info.groupOwnerAddress;
             const isOwner = info.isGroupOwner;
- 
+
             if (isOwner) {
               groupRole = 'owner';
               if (serverSocketBound) {
@@ -476,13 +483,13 @@ export function useInitializeServices() {
                 const secure = new SecureTransport(raw, privateKey, publicKey, deviceId, displayName);
                 const connKey = `owner-socket-${Date.now()}`;
                 const ownerEntry = setupPeerConnection(connKey, raw, secure, deviceId);
-                ownerEntry.scheduleHandshakeRecovery();
+                scheduleHandshakeRecovery();
                 // Store the MAC of the client that just connected (captured by lastTargetMacAddress
                 // on the other side). On the server side we don't know the client MAC until the
                 // handshake completes, so we store nothing here — that's fine; the connKey is
                 // unique enough for the owner's inbound socket lifetime.
                 void ownerEntry;
- 
+
                 raw.onConnect(async () => {
                   console.log(`[P2P DEBUG][${connKey}] TCP Server received client connection. Initiating handshake...`);
                   try {
@@ -491,7 +498,7 @@ export function useInitializeServices() {
                     console.error('[P2P DEBUG] Failed establishing handshake on client connect:', err);
                   }
                 });
- 
+
                 await raw.openServerSocket(8888);
                 serverSocketBound = true;
                 console.log('[P2P DEBUG] TCP ServerSocket bound and listening on port 8888.');
@@ -501,12 +508,12 @@ export function useInitializeServices() {
             } else {
               groupRole = 'client';
               const connKey = ownerAddress || 'pending-owner';
- 
+
               if (connectionsByKey.has(connKey) || connectingKeys.has(connKey)) {
                 console.log(`[P2P DEBUG] Already connected/connecting to owner ${connKey}. Ignoring duplicate event.`);
                 return;
               }
- 
+
               // Resolve empty owner address by fetching updated connection info with backoff
               if (!ownerAddress || ownerAddress === '') {
                 console.log('[P2P DEBUG] Group Owner Address is empty. Retrying updated connection info fetch...');
@@ -524,7 +531,7 @@ export function useInitializeServices() {
                   }
                 }
               }
- 
+
               console.log('[P2P DEBUG] I am Client. Target Group Owner IP:', ownerAddress);
               if (!ownerAddress || ownerAddress === '') {
                 console.error('[P2P DEBUG] Cannot connect: Group Owner Address remains empty after retries. Resetting P2P group...');
@@ -532,19 +539,19 @@ export function useInitializeServices() {
                 await performP2PCleanup('Client Empty GO IP');
                 return;
               }
- 
+
               const finalKey = ownerAddress;
               connectingKeys.add(finalKey);
- 
+
               const raw = new AndroidWifiP2PTransport(deviceId);
               const secure = new SecureTransport(raw, privateKey, publicKey, deviceId, displayName);
               const clientEntry = setupPeerConnection(finalKey, raw, secure, deviceId);
-              clientEntry.scheduleHandshakeRecovery();
+              scheduleHandshakeRecovery();
               // Populate the MAC address for proper disconnect-key cleanup
               if (lastTargetMacAddress) {
                 clientEntry.deviceAddress = lastTargetMacAddress;
               }
- 
+
               // Retry with exponential backoff: 500ms, 1s, 2s, 4s, 8s
               let delay = 500;
               let connected = false;
@@ -579,10 +586,10 @@ export function useInitializeServices() {
         };
 
         unsubConnectionInfo = AndroidWifiP2PTransport.onConnectionInfo(handleConnectionInfo);
- 
+
         unsubPeersChanged = AndroidWifiP2PTransport.onPeersChanged(async (peers) => {
           console.log('[P2P DEBUG] Wi-Fi Direct peers changed. Peers count:', peers.length, 'Peers:', peers);
- 
+
           // A device already committed as a CLIENT of another group cannot
           // also connect out to a second peer â€” that's a real Wi-Fi Direct
           // constraint. But being the GROUP OWNER (or unassigned) should NOT
@@ -591,7 +598,7 @@ export function useInitializeServices() {
             console.log('[P2P DEBUG] Already a client of another group. Ignoring peers list.');
             return;
           }
- 
+
           const isAlreadyConnectedOrConnecting = (pAddress: string, pName: string): boolean => {
             if (connectingKeys.has(pAddress) || connectionsByKey.has(pAddress)) {
               return true;
@@ -607,7 +614,7 @@ export function useInitializeServices() {
             });
             return hasMatchingConnection;
           };
- 
+
           // Find peers that are AVAILABLE (status 3) and not already
           // connected or mid-connection â€” this is now checked PER PEER
           // instead of via a single global "is anyone connected" flag, so
@@ -696,7 +703,7 @@ export function useInitializeServices() {
           try {
             await AndroidWifiP2PTransport.connectToPeer(candidateToConnect.deviceAddress);
             console.log('[P2P DEBUG] Native connectToPeer call resolved successfully. Waiting for Group Formation connection info event...');
-            
+
             // Active polling fallback: check group status periodically to handle lost/delayed OS broadcasts
             let pollCount = 0;
             const intervalId = setInterval(async () => {
@@ -726,7 +733,7 @@ export function useInitializeServices() {
           } catch (err: any) {
             console.error('[P2P DEBUG] connectToPeer failed:', err);
             connectingKeys.delete(candidateToConnect.deviceAddress);
-            
+
             // Only perform cleanup if we are still unassigned and no active/connecting key exists
             if (groupRole === 'unassigned' && connectionsByKey.size === 0 && connectingKeys.size === 0) {
               await new Promise((resolve) => setTimeout(resolve, 3000));
@@ -737,65 +744,68 @@ export function useInitializeServices() {
             }
           }
         });
- 
+
         let lastDiscoverTime = 0;
         const scannedPeersCache = new Set<string>();
- 
+
         // Wire up BLE discovery callback
-        currentScanner = new BleScanner(async (peerDevice) => {
-          if (!scannedPeersCache.has(peerDevice.deviceId)) {
-            scannedPeersCache.add(peerDevice.deviceId);
+        const handlePeerDiscovered = async (peerDevice: any) => {
+          // Feed to PeerRegistry
+          PeerRegistry.upsert({
+            id: peerDevice.device_id,
+            ...peerDevice,
+            discovered_at: Date.now(),
+            last_seen: Date.now(),
+          });
+
+          if (!scannedPeersCache.has(peerDevice.device_id)) {
+            scannedPeersCache.add(peerDevice.device_id);
             try {
               const peersRepo = new MobileRepository(db);
-              const exists = await peersRepo.getPeer(peerDevice.deviceId);
+              const exists = await peersRepo.getPeer(peerDevice.device_id);
               if (!exists) {
-                console.log(`[P2P DEBUG] First time seeing peer ${peerDevice.deviceId.substring(0, 8)} via BLE. Adding to local DB...`);
+                console.log(`[P2P DEBUG] First time seeing peer ${peerDevice.device_id.substring(0, 8)} via BLE. Adding to local DB...`);
                 await peersRepo.addNewPeer({
-                  deviceId: peerDevice.deviceId,
-                  publicKey: peerDevice.publicKeyHash,
+                  deviceId: peerDevice.device_id,
+                  publicKey: peerDevice.public_key_hash,
                   role: peerDevice.role,
                   trustStatus: 'pending',
-                  displayName: peerDevice.displayName
+                  displayName: peerDevice.name
                 });
-              } else if (!(exists._raw as any).display_name && peerDevice.displayName) {
+              } else if (!(exists._raw as any).display_name && peerDevice.name) {
                 await peersRepo.addNewPeer({
-                  deviceId: peerDevice.deviceId,
-                  publicKey: peerDevice.publicKeyHash,
+                  deviceId: peerDevice.device_id,
+                  publicKey: peerDevice.public_key_hash,
                   role: peerDevice.role,
                   trustStatus: (exists._raw as any).trust_status,
-                  displayName: peerDevice.displayName
+                  displayName: peerDevice.name
                 });
               }
             } catch (err) {
               console.warn('[P2P DEBUG] Failed to query/add new BLE peer to DB:', err);
-              scannedPeersCache.delete(peerDevice.deviceId);
+              scannedPeersCache.delete(peerDevice.device_id);
             }
           }
- 
-          mapService.updatePeerRssi(peerDevice.deviceId, peerDevice.rssi);
- 
-          // ── Update live BLE-first resolution map ─────────────────────────────
-          // Store the deviceId keyed by multiple name variants so onPeersChanged
-          // can reliably match regardless of the Wi-Fi Direct device name format.
-          if (peerDevice.displayName) {
-            // Use compound key "firstWord:idPrefix" (e.g. "maryam:4ba05e47")
-            // so multiple users with the same first name don't collide.
-            const firstWord = peerDevice.displayName.split(/['\s]/)[0].toLowerCase();
-            const idPrefix = peerDevice.deviceId.substring(0, 8).toLowerCase();
-            const compoundKey = `${firstWord}:${idPrefix}`;
-            bleDiscoveredIds.set(compoundKey, peerDevice.deviceId);
-            console.log(`[P2P DEBUG] BLE map updated: '${compoundKey}' => ${peerDevice.deviceId.substring(0, 8)}`);
+
+          if (peerDevice.rssi) {
+            mapService.updatePeerRssi(peerDevice.device_id, peerDevice.rssi);
           }
 
-          // Same fix as onPeersChanged: only skip discovery for a peer we're
-          // already connected/connecting to (or if we're locked as a client
-          // elsewhere) â€” not just because *some* connection exists.
-          const alreadyConnected = connectionsByKey.has(peerDevice.deviceId) ||
-            Array.from(connectionsByKey.values()).some((c) => c.deviceId === peerDevice.deviceId);
- 
+          // ── Update live BLE-first resolution map ─────────────────────────────
+          if (peerDevice.name) {
+            const firstWord = peerDevice.name.split(/['\s]/)[0].toLowerCase();
+            const idPrefix = peerDevice.device_id.substring(0, 8).toLowerCase();
+            const compoundKey = `${firstWord}:${idPrefix}`;
+            bleDiscoveredIds.set(compoundKey, peerDevice.device_id);
+            console.log(`[P2P DEBUG] BLE map updated: '${compoundKey}' => ${peerDevice.device_id.substring(0, 8)}`);
+          }
+
+          const alreadyConnected = connectionsByKey.has(peerDevice.device_id) ||
+            Array.from(connectionsByKey.values()).some((c) => c.deviceId === peerDevice.device_id);
+
           if (groupRole !== 'client' && !alreadyConnected) {
-            console.log(`[P2P DEBUG] BLE Scanned Peer: ${peerDevice.deviceId.substring(0, 8)}. My ID: ${deviceId.substring(0, 8)}.`);
- 
+            console.log(`[P2P DEBUG] BLE Scanned Peer: ${peerDevice.device_id.substring(0, 8)}. My ID: ${deviceId.substring(0, 8)}.`);
+
             const now = Date.now();
             if (now - lastDiscoverTime > 5000) {
               lastDiscoverTime = now;
@@ -807,8 +817,8 @@ export function useInitializeServices() {
               }
             }
           }
-        });
- 
+        };
+
         // â”€â”€ Periodic discovery retry timer â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         // If onPeersChanged never fires (devices not in same discovery window),
         // re-trigger discoverPeers every 30s while we're unassigned and have
@@ -827,14 +837,14 @@ export function useInitializeServices() {
             console.warn('[P2P DEBUG] Retry discoverPeers failed:', err);
           }
         }, 30000);
- 
+
         try {
-          currentScanner.startScanning();
+          await startScanning(handlePeerDiscovered);
         } catch (err) {
           console.warn('[P2P Bootstrap] Failed to start BLE scanning (check if Bluetooth is enabled):', err);
         }
       };
- 
+
       /**
        * Shuts down all active BLE advertisements, scanners, and socket streams.
        */
@@ -856,12 +866,9 @@ export function useInitializeServices() {
           await currentAdvertiser.stopAdvertising();
           currentAdvertiser = undefined;
         }
-        if (currentScanner) {
-          currentScanner.destroy();
-          currentScanner = undefined;
-        }
+        await cleanupBleScanner();
         for (const entry of Array.from(connectionsByKey.values())) {
-          await entry.raw.disconnect().catch(() => {});
+          await entry.raw.disconnect().catch(() => { });
           chatService.unregisterSecureTransport(entry.secure);
         }
         connectionsByKey.clear();
@@ -871,13 +878,13 @@ export function useInitializeServices() {
         // Stop the heartbeat timer in ChatService
         chatService.destroy();
       };
- 
+
       // 3. Auto-Login Recovery Checks
       const existingUser = await authService.getCurrentUser();
       if (existingUser) {
         await initTransportsForUser(existingUser);
       }
- 
+
       setServices({
         authService,
         chatService,
@@ -888,15 +895,15 @@ export function useInitializeServices() {
         shutdownTransports
       });
     };
- 
+
     let cleanupTransports: (() => Promise<void>) | null = null;
     let initTransportsRef: ((user: LocalUser) => Promise<void>) | null = null;
     let servicesRef: typeof services | null = null;
- 
+
     initAsync().catch((error) => {
       console.error('Failed to bootstrap services:', error);
     });
- 
+
     // Capture refs for AppState handler after services are initialized
     const servicesUpdateUnsub = setInterval(() => {
       setServices((prev) => {
@@ -908,14 +915,14 @@ export function useInitializeServices() {
         return prev;
       });
     }, 500);
- 
+
     // ENHANCEMENT 7: AppState handler disabled for background P2P reliability
     const handleAppStateChange = async (nextState: AppStateStatus) => {
       console.log('[P2P Bootstrap] AppState transition to:', nextState, '(Transports kept active)');
     };
- 
+
     const appStateSub = AppState.addEventListener('change', handleAppStateChange);
- 
+
     return () => {
       clearInterval(servicesUpdateUnsub);
       appStateSub.remove();
@@ -927,6 +934,6 @@ export function useInitializeServices() {
       }
     };
   }, []);
- 
+
   return services;
 }

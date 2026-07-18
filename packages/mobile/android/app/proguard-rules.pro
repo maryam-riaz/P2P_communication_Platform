@@ -13,3 +13,15 @@
 
 # Add any project specific keep options here:
 -keep class expo.modules.** { *; }
+
+# Keep logging in release builds
+-assumenosideeffects class android.util.Log {
+    public static int v(...);
+    public static int d(...);
+    public static int i(...);
+}
+
+# Do NOT remove warn/error
+-keep class com.disasterp2p.** { *; }
+-keepattributes SourceFile,LineNumberTable
+-renamesourcefileattribute SourceFile

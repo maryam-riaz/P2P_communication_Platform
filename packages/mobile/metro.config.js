@@ -18,4 +18,10 @@ config.resolver.nodeModulesPaths = [
 // 3. Force Metro to resolve symlinks
 config.resolver.disableHierarchicalLookup = true;
 
+// 4. Ensure unstable_serverRoot is projectRoot so that entry point paths relative to packages/mobile (../../node_modules/expo-router/entry.js) resolve correctly during native bundling
+config.server = {
+  ...config.server,
+  unstable_serverRoot: projectRoot,
+};
+
 module.exports = config;

@@ -1,19 +1,51 @@
-import { BleManager } from 'react-native-ble-plx';
+/**
+ * Shared BLE Manager initialization
+ * 
+ * Replaces react-native-ble-plx with react-native-ble-manager.
+ * Handles initialization of the native BLE module.
+ */
+
+import BleManager from 'react-native-ble-manager';
 
 /**
- * A single app-wide BleManager instance.
- *
- * react-native-ble-plx's BleManager wraps a native BLE stack object. Creating
- * more than one (e.g. one inside BleScanner for peer discovery, and a second
- * one ad-hoc inside a screen just to poll `state()`) means two separate
- * native listeners/handles fighting over the same radio, which is wasteful
- * and has been a contributing factor to main-thread jank during BLE bursts.
- *
- * Anything that needs a BleManager (discovery scanning, a simple "is
- * Bluetooth on?" check, etc.) should import `sharedBleManager` from here
- * instead of calling `new BleManager()` directly.
- *
- * Do NOT call `.destroy()` on this from a screen/component's cleanup — it's
- * shared app-wide. Only destroy it once, on full app teardown, if ever.
+ * Initialize the BLE manager.
+ * Call this once at app startup, before starting any BLE operations.
  */
-export const sharedBleManager = new BleManager();
+export async function initializeBleManager(): Promise<void> {
+  try {
+    // Start the BLE module (no UI alerts, silent mode)
+    await BleManager.start({ showAlert: false });
+    console.log('[BLE] Manager initialized successfully');
+  } catch (error) {
+    console.error('[BLE] Failed to initialize BleManager:', error);
+    throw error;
+  }
+}
+
+/**
+ * Check if BLE is enabled on the device.
+ */
+export async function isBleEnabled(): Promise<boolean> {
+  try {
+    const state = await BleManager.getState();
+    // state can be 'on', 'off', 'unknown', 'resetting'
+    return state === 'on';
+  } catch (error) {
+    console.error('[BLE] Error checking BLE state:', error);
+    return false;
+  }
+}
+
+/**
+ * Get the current BLE state.
+ */
+export async function getBleState(): Promise<string> {
+  try {
+    return await BleManager.getState();
+  } catch (error) {
+    console.error('[BLE] Error getting BLE state:', error);
+    return 'unknown';
+  }
+}
+
+export { BleManager };

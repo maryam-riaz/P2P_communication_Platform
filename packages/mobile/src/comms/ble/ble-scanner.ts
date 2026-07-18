@@ -1,201 +1,280 @@
-import { BleManager, Device } from 'react-native-ble-plx';
-import { BleDevice, DISASTER_P2P_SERVICE_UUID, UserRole } from './ble-types';
-import { sharedBleManager } from './shared-ble-manager';
+/**
+ * BLE Scanner with NativeEventEmitter
+ * 
+ * Replaces polling with event-driven discovery.
+ * Manages duty cycle: scan 2s, sleep 3s (~40% active).
+ * Parses 25-byte manufacturer data packets without connecting to peripherals.
+ */
+
+import { NativeEventEmitter, NativeModules, EventSubscription } from 'react-native';
+import type { BLEAdvertisementData, DiscoveredPeer } from './ble-types';
+import { logger } from '../../utils/Logger';
+
+import BleManager from 'react-native-ble-manager';
+
+const emitter = new NativeEventEmitter(NativeModules.BleManager);
+
+// App-specific BLE configuration
+const DISASTER_P2P_SERVICE_UUID = '550e8400-e29b-41d4-a716-446655440000';
+const DISASTER_P2P_MANUFACTURER_ID = 0x004c; // Apple's manufacturer ID for testing; use your own
+const SCAN_DURATION_MS = 2000;   // Scan for 2 seconds
+const SLEEP_DURATION_MS = 3000;  // Sleep for 3 seconds
+const AD_PACKET_SIZE = 25;       // Expected payload size
+
+let isScanning = false;
+let scanTimer: NodeJS.Timeout | null = null;
+let peripheralListener: EventSubscription | null = null;
+let stateListener: EventSubscription | null = null;
 
 /**
- * Converts a 16-byte Uint8Array to a UUID string with dashes.
+ * Parse the 25-byte manufacturer data packet.
+ * Expected format (from TRANSPORT.md):
+ * - device_id (16 bytes) — hardware UUID
+ * - role (1 byte) — 0=Victim, 1=Rescuer, 2=Admin
+ * - public_key_hash (4 bytes) — first 4 bytes of SHA-256(pubkey)
+ * - timestamp (4 bytes) — Unix seconds (big-endian)
  */
-export function bytesToUuid(bytes: Uint8Array): string {
-  if (bytes.length !== 16) {
-    throw new Error('UUID bytes must be exactly 16 bytes');
+function parseAdvertisementPacket(data: string | Uint8Array | number[]): BLEAdvertisementData | null {
+  try {
+    let bytes: Uint8Array;
+    if (typeof data === 'string') {
+      if (data.length === AD_PACKET_SIZE * 2) {
+        bytes = new Uint8Array(data.match(/.{1,2}/g)!.map(b => parseInt(b, 16)));
+      } else {
+        bytes = new Uint8Array(Buffer.from(data, 'base64'));
+      }
+    } else if (Array.isArray(data)) {
+      bytes = new Uint8Array(data);
+    } else {
+      bytes = new Uint8Array(data);
+    }
+
+    if (bytes.length !== AD_PACKET_SIZE) {
+      logger.warn('BLE', `Invalid ad packet size: ${bytes.length}, expected ${AD_PACKET_SIZE}`);
+      return null;
+    }
+
+    const device_id = Buffer.from(bytes.slice(0, 16)).toString('hex');
+    const role = bytes[16];
+    const public_key_hash = Buffer.from(bytes.slice(17, 21)).toString('hex');
+    const timestamp = new DataView(bytes.buffer, 21, 4).getUint32(0, false);
+
+    const roles = ['victim', 'rescuer', 'admin'];
+    return {
+      device_id,
+      role: (roles[role] as any) || 'unknown',
+      public_key_hash,
+      timestamp,
+      rssi: undefined,
+    };
+  } catch (error) {
+    logger.error('BLE', 'Error parsing advertisement packet', error instanceof Error ? error : new Error(String(error)));
+    return null;
   }
-  const hexParts: string[] = [];
-  for (let i = 0; i < 16; i++) {
-    hexParts.push(bytes[i].toString(16).padStart(2, '0'));
-  }
-  const hex = hexParts.join('');
-  return [
-    hex.substring(0, 8),
-    hex.substring(8, 12),
-    hex.substring(12, 16),
-    hex.substring(16, 20),
-    hex.substring(20, 32),
-  ].join('-');
 }
 
 /**
- * Unpacks a 25-byte advertisement data payload.
+ * Callback when a peripheral is discovered.
+ * Extract manufacturer data without connecting.
  */
-export function unpackAdvertisementPayload(payload: Uint8Array): {
-  deviceId: string;
-  role: UserRole;
-  publicKeyHash: string;
-  timestamp: number;
-} {
-  if (payload.length !== 25) {
-    throw new Error(`Invalid BLE ad payload length: ${payload.length} bytes (expected 25)`);
+function onDiscoverPeripheral(peripheral: any): void {
+  try {
+    const advertising = peripheral.advertising;
+    if (!advertising) return;
+
+    // Optional fast filter if we use serviceUUIDs: []
+    const hasCorrectService = advertising.serviceUUIDs?.includes(DISASTER_P2P_SERVICE_UUID) || 
+                              advertising.serviceUUIDs?.includes(DISASTER_P2P_SERVICE_UUID.toLowerCase()) ||
+                              advertising.serviceUUIDs?.includes(DISASTER_P2P_SERVICE_UUID.toUpperCase());
+
+    // Extract manufacturer data (handles react-native-ble-manager object format)
+    let payloadBytes: number[] | undefined;
+    
+    if (advertising.manufacturerRawData?.bytes) {
+      payloadBytes = advertising.manufacturerRawData.bytes;
+    } else if (advertising.manufacturerData) {
+      const keys = Object.keys(advertising.manufacturerData);
+      if (keys.length > 0 && advertising.manufacturerData[keys[0]]?.bytes) {
+        payloadBytes = advertising.manufacturerData[keys[0]].bytes;
+      } else if (Array.isArray(advertising.manufacturerData)) {
+        payloadBytes = advertising.manufacturerData;
+      }
+    }
+
+    if (!payloadBytes) {
+      // Not our packet, silently ignore to avoid log spam if we are scanning all
+      return;
+    }
+
+    // Parse the 25-byte payload
+    const parsed = parseAdvertisementPacket(payloadBytes);
+    if (!parsed) {
+      logger.warn('BLE', `Failed to parse payload from ${peripheral.id}`);
+      return;
+    }
+
+    // Add RSSI and name for logging
+    const adData: BLEAdvertisementData = {
+      ...parsed,
+      rssi: peripheral.rssi || 0,
+      name: peripheral.advertising?.localName,
+    };
+
+    logger.info('BLE', `Peer: ${adData.device_id.slice(0, 8)} role=${adData.role} rssi=${adData.rssi}`);
+
+    // Emit event for PeerRegistry to consume
+    handleAdvertisementReceived(adData);
+  } catch (error) {
+    logger.error('BLE', 'onDiscoverPeripheral failed', error instanceof Error ? error : new Error(String(error)));
   }
-
-  // 1. Unpack Device ID (16 bytes)
-  const deviceId = bytesToUuid(payload.subarray(0, 16));
-
-  // 2. Unpack Role (1 byte)
-  const roleVal = payload[16];
-  let role: UserRole = 'user';
-  if (roleVal === 1) role = 'responder';
-  if (roleVal === 2) role = 'admin';
-
-  // 3. Unpack Public Key Hash (4 bytes)
-  const hashParts: string[] = [];
-  for (let i = 17; i < 21; i++) {
-    hashParts.push(payload[i].toString(16).padStart(2, '0'));
-  }
-  const publicKeyHash = hashParts.join('');
-
-  // 4. Unpack Timestamp (4 bytes)
-  const view = new DataView(payload.buffer, payload.byteOffset, payload.byteLength);
-  const timestamp = view.getUint32(21, false); // Big endian
-
-  return { deviceId, role, publicKeyHash, timestamp };
 }
 
-export class BleScanner {
-  private isScanning = false;
-  private scanTimer: any = null;
-  private windowTimer: any = null;
-  private bleManager: BleManager;
+/**
+ * Callback when BLE state changes.
+ */
+function onBleStateChange(state: string): void {
+  console.log('[BLE] State changed:', state);
+  if (state === 'off') {
+    console.warn('[BLE] Bluetooth turned off');
+    stopScanning();
+  } else if (state === 'on') {
+    console.log('[BLE] Bluetooth turned on');
+  }
+}
 
-  constructor(private onPeerDiscovered: (device: BleDevice) => void) {
-    this.bleManager = sharedBleManager;
+/**
+ * Handle received advertisement (to be implemented by the app).
+ * This will be called from onDiscoverPeripheral and should be
+ * connected to PeerRegistry.upsert().
+ */
+let advertisementHandler: ((data: BLEAdvertisementData) => void) | null = null;
+
+function handleAdvertisementReceived(data: BLEAdvertisementData): void {
+  if (advertisementHandler) {
+    advertisementHandler(data);
+  }
+}
+
+/**
+ * Start the duty-cycled BLE scan.
+ * Scan 2s, sleep 3s, repeat.
+ */
+export async function startScanning(
+  onAdvertisement: (data: BLEAdvertisementData) => void
+): Promise<void> {
+  if (isScanning) {
+    logger.warn('BLE', 'Scan already in progress');
+    return;
   }
 
-  startScanning(): void {
-    if (this.isScanning) return;
-    this.isScanning = true;
-    console.log('[BLE Scanner] Periodic scanning started.');
+  advertisementHandler = onAdvertisement;
 
-    const startScan = () => {
-      if (!this.isScanning) return;
-      this.bleManager.startDeviceScan(
-        null,
-        { allowDuplicates: false },
-        (error, device) => {
-          if (error) {
-            console.error('[BLE Scanner] Scan error:', error);
-            return;
-          }
-          if (device) {
-            this.handleDiscoveredDevice(device);
-          }
-        }
-      );
-    };
-
-    const runScanCycle = () => {
-      if (!this.isScanning) return;
-
-      startScan();
-
-      // Schedule the next scan restart in 5 seconds (prevents interval piling during thread lags)
-      this.scanTimer = setTimeout(() => {
-        if (this.isScanning) {
-          this.bleManager.stopDeviceScan();
-          runScanCycle();
-        }
-      }, 35000);
-    };
-
-    runScanCycle();
-  }
-
-  /**
-   * Stops BLE scanning and clears scheduling timers.
-   */
-  stopScanning(): void {
-    if (!this.isScanning) return;
-    this.isScanning = false;
-
-    if (this.scanTimer) {
-      clearTimeout(this.scanTimer);
-      this.scanTimer = null;
+  try {
+    // Subscribe to peripheral discovery events
+    if (peripheralListener) {
+      peripheralListener.remove();
     }
-    this.bleManager.stopDeviceScan();
-    console.log('[BLE Scanner] Scanning stopped.');
-  }
+    peripheralListener = emitter.addListener('BleManagerDiscoverPeripheral', onDiscoverPeripheral);
 
-  /**
-   * Parses a discovered BLE device from react-native-ble-plx.
-   * Extracts manufacturer data from the advertisement and passes it
-   * through the existing unpackAdvertisementPayload() pipeline.
-   */
-  private handleDiscoveredDevice(device: Device): void {
-    try {
-      // react-native-ble-plx exposes manufacturerData as a base64 string
-      const rawBase64 = device.manufacturerData;
-      if (!rawBase64) return;
-
-      const binary = atob(rawBase64);
-      const rawBytes = new Uint8Array(binary.length);
-      for (let i = 0; i < binary.length; i++) {
-        rawBytes[i] = binary.charCodeAt(i);
-      }
-
-      // Check if advertisement starts with our test/development company ID (0xFFFF)
-      // and is exactly 27 bytes (2 bytes company ID + 25 bytes custom payload)
-      if (rawBytes.length === 27 && rawBytes[0] === 0xFF && rawBytes[1] === 0xFF) {
-        console.log(`[BLE Scanner] Match found! MAC: ${device.id}, RSSI: ${device.rssi}`);
-        const payload = rawBytes.subarray(2); // Skip company ID
-        this.onAdvertisementReceived(payload, device.rssi ?? -100, device.name ?? null);
-      }
-    } catch (error) {
-      console.error('[BLE Scanner] Error parsing discovered device:', error);
+    // Subscribe to BLE state change events
+    if (stateListener) {
+      stateListener.remove();
     }
+    stateListener = emitter.addListener('BleManagerDidUpdateState', onBleStateChange);
+
+    isScanning = true;
+    logger.info('BLE', 'Starting duty-cycled scan (2s on, 3s off)');
+
+    // Start the first scan cycle
+    await executeScanCycle();
+  } catch (error) {
+    logger.error('BLE', 'startScanning failed', error instanceof Error ? error : new Error(String(error)));
+    isScanning = false;
+    throw error;
   }
+}
 
-  /**
-   * Decodes and delivers a raw advertisement data payload to the app callback.
-   * Also callable directly in tests via the existing test harness.
-   */
-  onAdvertisementReceived(rawManufacturerData: Uint8Array, rssi: number, localName: string | null = null): void {
-    try {
-      const unpacked = unpackAdvertisementPayload(rawManufacturerData);
-      
-      let displayName: string | undefined = undefined;
-      if (localName && localName.startsWith('DP2P:')) {
-        const parts = localName.split(':');
-        if (parts.length >= 3) {
-          displayName = parts[1];
-        }
-      }
+/**
+ * Execute one scan cycle and schedule the next.
+ */
+async function executeScanCycle(): Promise<void> {
+  if (!isScanning) return;
 
-      this.onPeerDiscovered({
-        deviceId: unpacked.deviceId,
-        role: unpacked.role,
-        publicKeyHash: unpacked.publicKeyHash,
-        timestamp: unpacked.timestamp,
-        rssi,
-        lastSeen: Date.now(),
-        displayName,
-      });
-    } catch (error) {
-      console.error('[BLE Scanner] Error unpacking discovered advertisement', error);
+  try {
+    // Scan for SCAN_DURATION_MS seconds
+    logger.debug('BLE', 'Starting scan cycle (2s)');
+    await BleManager.scan({
+      serviceUUIDs: [], // Scan all devices to bypass strict OS filtering bugs, we filter in JS
+      seconds: Math.ceil(SCAN_DURATION_MS / 1000),
+      allowDuplicates: true, // We want continuous updates
+      matchMode: 2, // MATCH_MODE_AGGRESSIVE
+      scanMode: 1,  // SCAN_MODE_LOW_LATENCY
+    });
+
+    // Schedule the sleep and next cycle
+    scanTimer = setTimeout(async () => {
+      logger.debug('BLE', 'Scan cycle complete, sleeping for 3s');
+      // After sleep, execute next cycle
+      await executeScanCycle();
+    }, SLEEP_DURATION_MS);
+  } catch (error) {
+    logger.error('BLE', 'Error during scan cycle', error instanceof Error ? error : new Error(String(error)));
+    if (isScanning) {
+      // Retry after a delay
+      scanTimer = setTimeout(executeScanCycle, 1000);
     }
   }
+}
 
-  /**
-   * Stops scanning. Call when the component using this is unmounted.
-   *
-   * Note: this intentionally does NOT call `bleManager.destroy()` anymore.
-   * The BleManager is now a shared, app-wide singleton (see
-   * shared-ble-manager.ts) used by other consumers too (e.g. MapScreen's
-   * Bluetooth-enabled check), so destroying it here would break BLE for the
-   * rest of the app. Only stop what this scanner itself started.
-   */
-  destroy(): void {
-    this.stopScanning();
+/**
+ * Stop scanning and clean up listeners.
+ */
+export async function stopScanning(): Promise<void> {
+  if (!isScanning) {
+    logger.debug('BLE', 'Scan already stopped');
+    return;
   }
 
-  status(): boolean {
-    return this.isScanning;
+  try {
+    isScanning = false;
+
+    // Clear timers
+    if (scanTimer) {
+      clearTimeout(scanTimer);
+      scanTimer = null;
+    }
+
+    // Stop any active scan
+    await BleManager.stopScan();
+
+    // Remove listeners to prevent memory leaks
+    if (peripheralListener) {
+      peripheralListener.remove();
+      peripheralListener = null;
+    }
+    if (stateListener) {
+      stateListener.remove();
+      stateListener = null;
+    }
+
+    advertisementHandler = null;
+
+    logger.info('BLE', 'Scanning stopped');
+  } catch (error) {
+    logger.error('BLE', 'stopScanning failed', error instanceof Error ? error : new Error(String(error)));
   }
+}
+
+/**
+ * Check if scanning is currently active.
+ */
+export function isScanningActive(): boolean {
+  return isScanning;
+}
+
+/**
+ * Cleanup function for app teardown.
+ */
+export async function cleanupBleScanner(): Promise<void> {
+  await stopScanning();
 }
