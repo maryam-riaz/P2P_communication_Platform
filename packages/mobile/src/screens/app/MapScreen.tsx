@@ -248,13 +248,9 @@ export default function MapScreen({ navigation }: any) {
       }
     };
 
-    // Check GPS and Bluetooth immediately and periodically
+    // Check GPS and Bluetooth once at mount
     checkGps();
     checkBluetooth();
-    const interval = setInterval(() => {
-      checkGps();
-      checkBluetooth();
-    }, 3000);
 
     // Subscribe to Wi-Fi Direct state changes
     let unsubState = () => { };
@@ -269,7 +265,6 @@ export default function MapScreen({ navigation }: any) {
 
     return () => {
       isMounted = false;
-      clearInterval(interval);
       unsubState();
     };
   }, []);

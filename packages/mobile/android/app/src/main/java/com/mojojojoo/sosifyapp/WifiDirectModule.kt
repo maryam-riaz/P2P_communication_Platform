@@ -132,7 +132,13 @@ class WifiDirectModule(private val reactContext: ReactApplicationContext) :
     @ReactMethod
     fun initialize(promise: Promise) {
         try {
-            channel = wifiP2pManager.initialize(reactContext, reactContext.mainLooper, null)
+            channel = wifiP2pManager.initialize(reactContext, reactContext.mainLooper, object : WifiP2pManager.ChannelListener {
+                override fun onChannelDisconnected() {
+                    android.util.Log.w("WifiDirectModule", "[ChannelListener] Channel disconnected! Thread: ${Thread.currentThread().name} (tid=${Thread.currentThread().id})")
+                    // Do NOT change behavior — this is purely diagnostic
+                }
+            })
+            android.util.Log.d("WifiDirectModule", "Channel initialized: $channel (thread: ${Thread.currentThread().name})")
 
             val intentFilter = IntentFilter().apply {
                 addAction(WifiP2pManager.WIFI_P2P_STATE_CHANGED_ACTION)

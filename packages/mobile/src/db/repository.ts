@@ -207,7 +207,12 @@ export class MobileRepository {
   }
 
   async getSosEvents(): Promise<SosEvent[]> {
-    return await this.db.get<SosEvent>('sos_events').query().fetch();
+    return await this.db.get<SosEvent>('sos_events')
+      .query(
+        Q.sortBy('created_at', Q.desc),
+        Q.take(50)
+      )
+      .fetch();
   }
 
   // ==========================================
@@ -256,16 +261,14 @@ export class MobileRepository {
       .fetch();
     if (stale.length === 0) return;
     await this.db.write(async () => {
-      for (const loc of stale) {
-        await loc.destroyPermanently();
-      }
+      await Promise.all(stale.map(loc => loc.destroyPermanently()));
     });
   }
 
   async getPendingSyncItems(): Promise<SyncQueue[]> {
     return await this.db
       .get<SyncQueue>('sync_queue')
-      .query(Q.sortBy('created_at', Q.asc))
+      .query(Q.sortBy('created_at', Q.asc), Q.take(100))
       .fetch();
   }
 }

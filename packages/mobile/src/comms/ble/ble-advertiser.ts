@@ -231,4 +231,12 @@ export class BleAdvertiser {
   status(): boolean {
     return this.isAdvertising;
   }
+
+  /**
+   * Returns whether the advertiser is currently actively advertising.
+   * Used by health-check intervals to detect and restart stopped advertising.
+   */
+  getIsAdvertising(): boolean {
+    return this.isAdvertising;
+  }
 }

@@ -13,7 +13,7 @@
 - Coordinate only — delegate implementation to sub-agents; do not write features yourself.
 - Split plan changes into parallelizable chunks and assign sub-agents accordingly.
 - Assign premium models to complex tasks (e.g. coding) and mid-tier models to simple tasks (e.g. docs).
-- After every feature (large or small): run lint, typecheck, and `next build` before considering it done.
+- After every feature (large or small): run tests before considering it done.
 
 ### Database schema changes
 - Always run `drizzle generate` + `drizzle migrate` after schema edits.

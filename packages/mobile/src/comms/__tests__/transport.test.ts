@@ -3,6 +3,7 @@ import { BleAdvertiser, packFullPayload, packTrimmedPayload } from '../ble/ble-a
 import { AndroidWifiP2PTransport } from '../wifi-direct/wifi-p2p-transport.android';
 import { SecureTransport } from '../secure-transport';
 import { DISASTER_P2P_MAGIC, AD_PAYLOAD_SIZE_FULL, AD_PAYLOAD_SIZE_TRIMMED } from '../ble/ble-types';
+import { _resetTcpMockState } from '../__mocks__/react-native';
 
 describe('P2P Comms Transport Layer End-to-End Tests', () => {
   let rawTransportA: AndroidWifiP2PTransport;
@@ -15,13 +16,16 @@ describe('P2P Comms Transport Layer End-to-End Tests', () => {
     }
   };
 
+  beforeEach(() => {
+    _resetTcpMockState();
+  });
+
   afterEach(async () => {
     if (rawTransportA) await rawTransportA.disconnect();
     if (rawTransportB) await rawTransportB.disconnect();
   });
 
   it('should complete the handshake when one side receives the other side\'s public-key exchange', async () => {
-    jest.setTimeout(10000);
     const keysA = generateKeyPair();
     const keysB = generateKeyPair();
     const deviceIdA = '11111111-2222-3333-4444-555555555555';

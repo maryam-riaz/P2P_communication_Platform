@@ -1,0 +1,239 @@
+Transport] Initiating unencrypted P2P public key exchange (attempt 2)...
+07-19 16:01:46.138  3238  3271 W ReactNativeJS: '[Secure Transport] Handshake send failed; retrying once the transport is ready:', { [Error: No active TCP connection.]
+07-19 16:01:46.138  3238  3271 W ReactNativeJS:   nativeStackAndroid: [],
+07-19 16:01:46.138  3238  3271 W ReactNativeJS:   userInfo: null,
+07-19 16:01:46.138  3238  3271 W ReactNativeJS:   code: 'TCP_NOT_CONNECTED' }
+07-19 16:01:46.586  3238  3271 I ReactNativeJS: '[P2P DEBUG] Connection Info Event received:', { groupFormed: false,
+07-19 16:01:46.586  3238  3271 I ReactNativeJS:   isGroupOwner: false,
+07-19 16:01:46.586  3238  3271 I ReactNativeJS:   groupOwnerAddress: '' }
+07-19 16:01:46.586  3238  3271 I ReactNativeJS: [P2P DEBUG] Group is not formed (info.groupFormed is false). Waiting for connection to establish...
+07-19 16:01:46.586  3238  3271 I ReactNativeJS: '[P2P DEBUG] Connection Info Event received:', { groupFormed: false,
+07-19 16:01:46.586  3238  3271 I ReactNativeJS:   isGroupOwner: false,
+07-19 16:01:46.586  3238  3271 I ReactNativeJS:   groupOwnerAddress: '' }
+07-19 16:01:46.587  3238  3271 I ReactNativeJS: [P2P DEBUG] Group is not formed (info.groupFormed is false). Waiting for connection to establish...
+07-19 16:01:46.587  3238  3271 I ReactNativeJS: [P2P Cleanup] No Wi-Fi Direct group formed, skipping removeGroup.
+07-19 16:01:46.587  3238  3271 I ReactNativeJS: [P2P DEBUG][192.168.49.1] Disconnected. Triggering re-discovery...
+07-19 16:01:46.593  3238  3271 I ReactNativeJS: [Android Wi-Fi Direct] Peer discovery started via WifiP2pManager.
+07-19 16:01:46.961  3238  3271 I ReactNativeJS: [Secure Transport] Initiating unencrypted P2P public key exchange (attempt 8)...
+07-19 16:01:46.963  3238  3271 W ReactNativeJS: '[Secure Transport] Handshake send failed; retrying once the transport is ready:', { [Error: No active TCP connection.]
+07-19 16:01:46.963  3238  3271 W ReactNativeJS:   nativeStackAndroid: [],
+07-19 16:01:46.963  3238  3271 W ReactNativeJS:   userInfo: null,
+07-19 16:01:46.963  3238  3271 W ReactNativeJS:   code: 'TCP_NOT_CONNECTED' }
+07-19 16:01:47.476  3238  3271 I ReactNativeJS: ℹ️  2026-07-19T11:01:47.476Z [INFO] BLE: State changed: on
+07-19 16:01:47.477  3238  3271 I ReactNativeJS: ℹ️  2026-07-19T11:01:47.476Z [INFO] BLE: Bluetooth turned on
+07-19 16:01:48.143  3238  3271 I ReactNativeJS: [Secure Transport] Initiating unencrypted P2P public key exchange (attempt 3)...
+07-19 16:01:48.146  3238  3271 W ReactNativeJS: '[Secure Transport] Handshake send failed; retrying once the transport is ready:', { [Error: No active TCP connection.]
+07-19 16:01:48.146  3238  3271 W ReactNativeJS:   nativeStackAndroid: [],
+07-19 16:01:48.146  3238  3271 W ReactNativeJS:   userInfo: null,
+07-19 16:01:48.146  3238  3271 W ReactNativeJS:   code: 'TCP_NOT_CONNECTED' }
+07-19 16:01:48.548  3238  3271 I ReactNativeJS: '[P2P DEBUG] Wi-Fi Direct peers changed. Peers count:', 1, 'Peers:', [ { status: 3,
+07-19 16:01:48.548  3238  3271 I ReactNativeJS:     deviceAddress: '46:ea:30:07:ce:a5',
+07-19 16:01:48.548  3238  3271 I ReactNativeJS:     deviceName: 'Maryam\'s A32' } ]
+07-19 16:01:48.549  3238  3271 I ReactNativeJS: '[P2P DEBUG] Wi-Fi Direct peers changed. Peers count:', 1, 'Peers:', [ { status: 3,
+07-19 16:01:48.549  3238  3271 I ReactNativeJS:     deviceAddress: '46:ea:30:07:ce:a5',
+07-19 16:01:48.549  3238  3271 I ReactNativeJS:     deviceName: 'Maryam\'s A32' } ]
+07-19 16:01:48.550  3238  3271 I ReactNativeJS: [P2P DEBUG] Candidate 'Maryam's A32' name fallback: local='talha' remote='maryam' isInitiator=false
+07-19 16:01:48.550  3238  3271 I ReactNativeJS: [P2P DEBUG] We are not the initiator for any available candidate peer. Waiting for them to connect...
+07-19 16:01:48.551  3238  3271 I ReactNativeJS: '[P2P DEBUG] Wi-Fi Direct peers changed. Peers count:', 1, 'Peers:', [ { status: 3,
+07-19 16:01:48.551  3238  3271 I ReactNativeJS:     deviceAddress: '46:ea:30:07:ce:a5',
+07-19 16:01:48.551  3238  3271 I ReactNativeJS:     deviceName: 'Maryam\'s A32' } ]
+07-19 16:01:48.552  3238  3271 I ReactNativeJS: '[P2P DEBUG] Wi-Fi Direct peers changed. Peers count:', 1, 'Peers:', [ { status: 3,
+07-19 16:01:48.552  3238  3271 I ReactNativeJS:     deviceAddress: '46:ea:30:07:ce:a5',
+07-19 16:01:48.552  3238  3271 I ReactNativeJS:     deviceName: 'Maryam\'s A32' } ]
+07-19 16:01:48.552  3238  3271 I ReactNativeJS: [P2P DEBUG] Candidate 'Maryam's A32' name fallback: local='talha' remote='maryam' isInitiator=false
+07-19 16:01:48.552  3238  3271 I ReactNativeJS: [P2P DEBUG] We are not the initiator for any available candidate peer. Waiting for them to connect...
+07-19 16:01:48.968  3238  3271 I ReactNativeJS: [Secure Transport] Initiating unencrypted P2P public key exchange (attempt 9)...
+07-19 16:01:48.971  3238  3271 W ReactNativeJS: '[Secure Transport] Handshake send failed; retrying once the transport is ready:', { [Error: No active TCP connection.]
+07-19 16:01:48.971  3238  3271 W ReactNativeJS:   nativeStackAndroid: [],
+07-19 16:01:48.971  3238  3271 W ReactNativeJS:   userInfo: null,
+07-19 16:01:48.971  3238  3271 W ReactNativeJS:   code: 'TCP_NOT_CONNECTED' }
+07-19 16:01:48.971  3238  3271 W ReactNativeJS: [Secure Transport] Handshake retry timed out after 15s. Disconnecting dead transport.
+07-19 16:01:48.975  3238  3271 I ReactNativeJS: '[ChatService] SecureTransport unregistered. Current pool size:', 0
+07-19 16:01:48.975  3238  3271 I ReactNativeJS: [P2P DEBUG] All connections gone. Resetting group state and triggering P2P cleanup...
+07-19 16:01:48.975  3238  3271 I ReactNativeJS: [P2P Cleanup - All Clients Disconnected] Starting robust P2P cleanup sequence...
+07-19 16:01:48.976  3238  3271 I ReactNativeJS: [Android Wi-Fi Direct] TCP transport disconnected.
+07-19 16:01:50.009  3238  3271 I ReactNativeJS: '[P2P DEBUG] Connection Info Event received:', { groupFormed: false,
+07-19 16:01:50.009  3238  3271 I ReactNativeJS:   isGroupOwner: false,
+07-19 16:01:50.009  3238  3271 I ReactNativeJS:   groupOwnerAddress: '' }
+07-19 16:01:50.009  3238  3271 I ReactNativeJS: [P2P DEBUG] Group is not formed (info.groupFormed is false). Waiting for connection to establish...
+07-19 16:01:50.010  3238  3271 I ReactNativeJS: '[P2P DEBUG] Connection Info Event received:', { groupFormed: false,
+07-19 16:01:50.010  3238  3271 I ReactNativeJS:   isGroupOwner: false,
+07-19 16:01:50.010  3238  3271 I ReactNativeJS:   groupOwnerAddress: '' }
+07-19 16:01:50.010  3238  3271 I ReactNativeJS: [P2P DEBUG] Group is not formed (info.groupFormed is false). Waiting for connection to establish...
+07-19 16:01:50.011  3238  3271 I ReactNativeJS: [P2P Cleanup] No Wi-Fi Direct group formed, skipping removeGroup.
+07-19 16:01:50.011  3238  3271 I ReactNativeJS: [P2P DEBUG][192.168.49.1] Disconnected. Triggering re-discovery...
+07-19 16:01:50.019  3238  3271 I ReactNativeJS: [Android Wi-Fi Direct] Peer discovery started via WifiP2pManager.
+07-19 16:01:50.150  3238  3271 I ReactNativeJS: [Secure Transport] Initiating unencrypted P2P public key exchange (attempt 4)...
+07-19 16:01:50.153  3238  3271 W ReactNativeJS: '[Secure Transport] Handshake send failed; retrying once the transport is ready:', { [Error: No active TCP connection.]
+07-19 16:01:50.153  3238  3271 W ReactNativeJS:   nativeStackAndroid: [],
+07-19 16:01:50.153  3238  3271 W ReactNativeJS:   userInfo: null,
+07-19 16:01:50.153  3238  3271 W ReactNativeJS:   code: 'TCP_NOT_CONNECTED' }
+07-19 16:01:50.487  3238  3271 I ReactNativeJS: ℹ️  2026-07-19T11:01:50.487Z [INFO] BLE: State changed: on
+07-19 16:01:50.488  3238  3271 I ReactNativeJS: ℹ️  2026-07-19T11:01:50.487Z [INFO] BLE: Bluetooth turned on
+07-19 16:01:51.920  3238  3271 I ReactNativeJS: '[P2P DEBUG] Wi-Fi Direct peers changed. Peers count:', 1, 'Peers:', [ { status: 3,
+07-19 16:01:51.920  3238  3271 I ReactNativeJS:     deviceAddress: '46:ea:30:07:ce:a5',
+07-19 16:01:51.920  3238  3271 I ReactNativeJS:     deviceName: 'Maryam\'s A32' } ]
+07-19 16:01:51.921  3238  3271 I ReactNativeJS: '[P2P DEBUG] Wi-Fi Direct peers changed. Peers count:', 1, 'Peers:', [ { status: 3,
+07-19 16:01:51.921  3238  3271 I ReactNativeJS:     deviceAddress: '46:ea:30:07:ce:a5',
+07-19 16:01:51.921  3238  3271 I ReactNativeJS:     deviceName: 'Maryam\'s A32' } ]
+07-19 16:01:51.922  3238  3271 I ReactNativeJS: [P2P DEBUG] Candidate 'Maryam's A32' name fallback: local='talha' remote='maryam' isInitiator=false
+07-19 16:01:51.922  3238  3271 I ReactNativeJS: [P2P DEBUG] We are not the initiator for any available candidate peer. Waiting for them to connect...
+07-19 16:01:51.923  3238  3271 I ReactNativeJS: '[P2P DEBUG] Wi-Fi Direct peers changed. Peers count:', 1, 'Peers:', [ { status: 3,
+07-19 16:01:51.923  3238  3271 I ReactNativeJS:     deviceAddress: '46:ea:30:07:ce:a5',
+07-19 16:01:51.923  3238  3271 I ReactNativeJS:     deviceName: 'Maryam\'s A32' } ]
+07-19 16:01:51.924  3238  3271 I ReactNativeJS: '[P2P DEBUG] Wi-Fi Direct peers changed. Peers count:', 1, 'Peers:', [ { status: 3,
+07-19 16:01:51.924  3238  3271 I ReactNativeJS:     deviceAddress: '46:ea:30:07:ce:a5',
+07-19 16:01:51.924  3238  3271 I ReactNativeJS:     deviceName: 'Maryam\'s A32' } ]
+07-19 16:01:51.924  3238  3271 I ReactNativeJS: [P2P DEBUG] Candidate 'Maryam's A32' name fallback: local='talha' remote='maryam' isInitiator=false
+07-19 16:01:51.924  3238  3271 I ReactNativeJS: [P2P DEBUG] We are not the initiator for any available candidate peer. Waiting for them to connect...
+07-19 16:01:52.157  3238  3271 I ReactNativeJS: [Secure Transport] Initiating unencrypted P2P public key exchange (attempt 5)...
+07-19 16:01:52.160  3238  3271 W ReactNativeJS: '[Secure Transport] Handshake send failed; retrying once the transport is ready:', { [Error: No active TCP connection.]
+07-19 16:01:52.160  3238  3271 W ReactNativeJS:   nativeStackAndroid: [],
+07-19 16:01:52.160  3238  3271 W ReactNativeJS:   userInfo: null,
+07-19 16:01:52.160  3238  3271 W ReactNativeJS:   code: 'TCP_NOT_CONNECTED' }
+07-19 16:01:53.501  3238  3271 I ReactNativeJS: ℹ️  2026-07-19T11:01:53.501Z [INFO] BLE: State changed: on
+07-19 16:01:53.501  3238  3271 I ReactNativeJS: ℹ️  2026-07-19T11:01:53.501Z [INFO] BLE: Bluetooth turned on
+07-19 16:01:54.164  3238  3271 I ReactNativeJS: [Secure Transport] Initiating unencrypted P2P public key exchange (attempt 6)...
+07-19 16:01:54.167  3238  3271 W ReactNativeJS: '[Secure Transport] Handshake send failed; retrying once the transport is ready:', { [Error: No active TCP connection.]
+07-19 16:01:54.167  3238  3271 W ReactNativeJS:   nativeStackAndroid: [],
+07-19 16:01:54.167  3238  3271 W ReactNativeJS:   userInfo: null,
+07-19 16:01:54.167  3238  3271 W ReactNativeJS:   code: 'TCP_NOT_CONNECTED' }
+07-19 16:01:56.172  3238  3271 I ReactNativeJS: [Secure Transport] Initiating unencrypted P2P public key exchange (attempt 7)...
+07-19 16:01:56.175  3238  3271 W ReactNativeJS: '[Secure Transport] Handshake send failed; retrying once the transport is ready:', { [Error: No active TCP connection.]
+07-19 16:01:56.175  3238  3271 W ReactNativeJS:   nativeStackAndroid: [],
+07-19 16:01:56.175  3238  3271 W ReactNativeJS:   userInfo: null,
+07-19 16:01:56.175  3238  3271 W ReactNativeJS:   code: 'TCP_NOT_CONNECTED' }
+07-19 16:01:56.509  3238  3271 I ReactNativeJS: ℹ️  2026-07-19T11:01:56.509Z [INFO] BLE: State changed: on
+07-19 16:01:56.509  3238  3271 I ReactNativeJS: ℹ️  2026-07-19T11:01:56.509Z [INFO] BLE: Bluetooth turned on
+07-19 16:01:58.179  3238  3271 I ReactNativeJS: [Secure Transport] Initiating unencrypted P2P public key exchange (attempt 8)...
+07-19 16:01:58.182  3238  3271 W ReactNativeJS: '[Secure Transport] Handshake send failed; retrying once the transport is ready:', { [Error: No active TCP connection.]
+07-19 16:01:58.182  3238  3271 W ReactNativeJS:   nativeStackAndroid: [],
+07-19 16:01:58.182  3238  3271 W ReactNativeJS:   userInfo: null,
+07-19 16:01:58.182  3238  3271 W ReactNativeJS:   code: 'TCP_NOT_CONNECTED' }
+07-19 16:01:59.519  3238  3271 I ReactNativeJS: ℹ️  2026-07-19T11:01:59.519Z [INFO] BLE: State changed: on
+07-19 16:01:59.519  3238  3271 I ReactNativeJS: ℹ️  2026-07-19T11:01:59.519Z [INFO] BLE: Bluetooth turned on
+07-19 16:02:00.187  3238  3271 I ReactNativeJS: [Secure Transport] Initiating unencrypted P2P public key exchange (attempt 9)...
+07-19 16:02:00.188  3238  3271 W ReactNativeJS: '[Secure Transport] Handshake send failed; retrying once the transport is ready:', { [Error: No active TCP connection.]
+07-19 16:02:00.188  3238  3271 W ReactNativeJS:   nativeStackAndroid: [],
+07-19 16:02:00.188  3238  3271 W ReactNativeJS:   userInfo: null,
+07-19 16:02:00.188  3238  3271 W ReactNativeJS:   code: 'TCP_NOT_CONNECTED' }
+07-19 16:02:00.189  3238  3271 W ReactNativeJS: [Secure Transport] Handshake retry timed out after 15s. Disconnecting dead transport.
+07-19 16:02:00.190  3238  3271 I ReactNativeJS: '[ChatService] SecureTransport unregistered. Current pool size:', 0
+07-19 16:02:00.190  3238  3271 I ReactNativeJS: [P2P DEBUG] All connections gone. Resetting group state and triggering P2P cleanup...
+07-19 16:02:00.190  3238  3271 I ReactNativeJS: [P2P Cleanup - All Clients Disconnected] Starting robust P2P cleanup sequence...
+07-19 16:02:00.191  3238  3271 I ReactNativeJS: [Android Wi-Fi Direct] TCP transport disconnected.
+07-19 16:02:01.216  3238  3271 I ReactNativeJS: '[P2P DEBUG] Connection Info Event received:', { groupFormed: false,
+07-19 16:02:01.216  3238  3271 I ReactNativeJS:   isGroupOwner: false,
+07-19 16:02:01.216  3238  3271 I ReactNativeJS:   groupOwnerAddress: '' }
+07-19 16:02:01.217  3238  3271 I ReactNativeJS: [P2P DEBUG] Group is not formed (info.groupFormed is false). Waiting for connection to establish...
+07-19 16:02:01.217  3238  3271 I ReactNativeJS: '[P2P DEBUG] Connection Info Event received:', { groupFormed: false,
+07-19 16:02:01.217  3238  3271 I ReactNativeJS:   isGroupOwner: false,
+07-19 16:02:01.217  3238  3271 I ReactNativeJS:   groupOwnerAddress: '' }
+07-19 16:02:01.217  3238  3271 I ReactNativeJS: [P2P DEBUG] Group is not formed (info.groupFormed is false). Waiting for connection to establish...
+07-19 16:02:01.218  3238  3271 I ReactNativeJS: [P2P Cleanup] No Wi-Fi Direct group formed, skipping removeGroup.
+07-19 16:02:01.218  3238  3271 I ReactNativeJS: [P2P DEBUG][192.168.49.1] Disconnected. Triggering re-discovery...
+07-19 16:02:01.225  3238  3271 I ReactNativeJS: [Android Wi-Fi Direct] Peer discovery started via WifiP2pManager.
+07-19 16:02:02.531  3238  3271 I ReactNativeJS: ℹ️  2026-07-19T11:02:02.531Z [INFO] BLE: State changed: on
+07-19 16:02:02.532  3238  3271 I ReactNativeJS: ℹ️  2026-07-19T11:02:02.531Z [INFO] BLE: Bluetooth turned on
+07-19 16:02:05.539  3238  3271 I ReactNativeJS: ℹ️  2026-07-19T11:02:05.539Z [INFO] BLE: State changed: on
+07-19 16:02:05.539  3238  3271 I ReactNativeJS: ℹ️  2026-07-19T11:02:05.539Z [INFO] BLE: Bluetooth turned on
+07-19 16:02:08.552  3238  3271 I ReactNativeJS: ℹ️  2026-07-19T11:02:08.552Z [INFO] BLE: State changed: on
+07-19 16:02:08.552  3238  3271 I ReactNativeJS: ℹ️  2026-07-19T11:02:08.552Z [INFO] BLE: Bluetooth turned on
+07-19 16:02:09.010  3238  3271 W ReactNativeJS: '[MapService] getCurrentPositionAsync failed, trying last known position:', { [Error: Current location is unavailable. Make sure that location services are enabled] code: 'ERR_CURRENT_LOCATION_IS_UNAVAILABLE' }
+07-19 16:02:11.562  3238  3271 I ReactNativeJS: ℹ️  2026-07-19T11:02:11.562Z [INFO] BLE: State changed: on
+07-19 16:02:11.562  3238  3271 I ReactNativeJS: ℹ️  2026-07-19T11:02:11.562Z [INFO] BLE: Bluetooth turned on
+07-19 16:02:14.573  3238  3271 I ReactNativeJS: ℹ️  2026-07-19T11:02:14.573Z [INFO] BLE: State changed: on
+07-19 16:02:14.573  3238  3271 I ReactNativeJS: ℹ️  2026-07-19T11:02:14.573Z [INFO] BLE: Bluetooth turned on
+07-19 16:02:17.583  3238  3271 I ReactNativeJS: ℹ️  2026-07-19T11:02:17.583Z [INFO] BLE: State changed: on
+07-19 16:02:17.583  3238  3271 I ReactNativeJS: ℹ️  2026-07-19T11:02:17.583Z [INFO] BLE: Bluetooth turned on
+07-19 16:02:20.594  3238  3271 I ReactNativeJS: ℹ️  2026-07-19T11:02:20.594Z [INFO] BLE: State changed: on
+07-19 16:02:20.594  3238  3271 I ReactNativeJS: ℹ️  2026-07-19T11:02:20.594Z [INFO] BLE: Bluetooth turned on
+07-19 16:02:23.605  3238  3271 I ReactNativeJS: ℹ️  2026-07-19T11:02:23.605Z [INFO] BLE: State changed: on
+07-19 16:02:23.605  3238  3271 I ReactNativeJS: ℹ️  2026-07-19T11:02:23.605Z [INFO] BLE: Bluetooth turned on
+07-19 16:02:26.617  3238  3271 I ReactNativeJS: ℹ️  2026-07-19T11:02:26.617Z [INFO] BLE: State changed: on
+07-19 16:02:26.617  3238  3271 I ReactNativeJS: ℹ️  2026-07-19T11:02:26.617Z [INFO] BLE: Bluetooth turned on
+07-19 16:02:29.627  3238  3271 I ReactNativeJS: ℹ️  2026-07-19T11:02:29.627Z [INFO] BLE: State changed: on
+07-19 16:02:29.627  3238  3271 I ReactNativeJS: ℹ️  2026-07-19T11:02:29.627Z [INFO] BLE: Bluetooth turned on
+07-19 16:02:32.637  3238  3271 I ReactNativeJS: ℹ️  2026-07-19T11:02:32.637Z [INFO] BLE: State changed: on
+07-19 16:02:32.638  3238  3271 I ReactNativeJS: ℹ️  2026-07-19T11:02:32.637Z [INFO] BLE: Bluetooth turned on
+07-19 16:02:35.650  3238  3271 I ReactNativeJS: ℹ️  2026-07-19T11:02:35.649Z [INFO] BLE: State changed: on
+07-19 16:02:35.650  3238  3271 I ReactNativeJS: ℹ️  2026-07-19T11:02:35.650Z [INFO] BLE: Bluetooth turned on
+07-19 16:02:38.390  3238  3271 I ReactNativeJS: [P2P Bootstrap] Group formation timeout (60s). Re-triggering discovery...
+07-19 16:02:38.397  3238  3271 I ReactNativeJS: [Android Wi-Fi Direct] Peer discovery started via WifiP2pManager.
+07-19 16:02:38.668  3238  3271 I ReactNativeJS: ℹ️  2026-07-19T11:02:38.668Z [INFO] BLE: State changed: on
+07-19 16:02:38.668  3238  3271 I ReactNativeJS: ℹ️  2026-07-19T11:02:38.668Z [INFO] BLE: Bluetooth turned on
+07-19 16:02:41.670  3238  3271 I ReactNativeJS: ℹ️  2026-07-19T11:02:41.670Z [INFO] BLE: State changed: on
+07-19 16:02:41.670  3238  3271 I ReactNativeJS: ℹ️  2026-07-19T11:02:41.670Z [INFO] BLE: Bluetooth turned on
+07-19 16:02:44.682  3238  3271 I ReactNativeJS: ℹ️  2026-07-19T11:02:44.682Z [INFO] BLE: State changed: on
+07-19 16:02:44.682  3238  3271 I ReactNativeJS: ℹ️  2026-07-19T11:02:44.682Z [INFO] BLE: Bluetooth turned on
+07-19 16:02:47.692  3238  3271 I ReactNativeJS: ℹ️  2026-07-19T11:02:47.692Z [INFO] BLE: State changed: on
+07-19 16:02:47.692  3238  3271 I ReactNativeJS: ℹ️  2026-07-19T11:02:47.692Z [INFO] BLE: Bluetooth turned on
+07-19 16:02:50.703  3238  3271 I ReactNativeJS: ℹ️  2026-07-19T11:02:50.703Z [INFO] BLE: State changed: on
+07-19 16:02:50.703  3238  3271 I ReactNativeJS: ℹ️  2026-07-19T11:02:50.703Z [INFO] BLE: Bluetooth turned on
+07-19 16:02:53.714  3238  3271 I ReactNativeJS: ℹ️  2026-07-19T11:02:53.713Z [INFO] BLE: State changed: on
+07-19 16:02:53.714  3238  3271 I ReactNativeJS: ℹ️  2026-07-19T11:02:53.714Z [INFO] BLE: Bluetooth turned on
+07-19 16:02:56.725  3238  3271 I ReactNativeJS: ℹ️  2026-07-19T11:02:56.725Z [INFO] BLE: State changed: on
+07-19 16:02:56.725  3238  3271 I ReactNativeJS: ℹ️  2026-07-19T11:02:56.725Z [INFO] BLE: Bluetooth turned on
+PS C:\AppV6> adb -s RFCT31QC4DR logcat -c                                       
+PS C:\AppV6> adb -s RFCT31QC4DR logcat -s ReactNativeJS
+--------- beginning of main
+07-19 16:03:11.778  3238  3271 I ReactNativeJS: ℹ️  2026-07-19T11:03:11.778Z [INFO] BLE: State changed: on
+07-19 16:03:11.779  3238  3271 I ReactNativeJS: ℹ️  2026-07-19T11:03:11.778Z [INFO] BLE: Bluetooth turned on
+07-19 16:03:14.789  3238  3271 I ReactNativeJS: '[P2P Bootstrap] AppState transition to:', 'background', '(Transports kept active)'
+07-19 16:03:19.783  4392  4437 I ReactNativeJS: Running "main"
+07-19 16:03:19.881  4392  4437 I ReactNativeJS: [Android Wi-Fi Direct] Native WifiP2pManager initialized.
+07-19 16:03:19.882  4392  4437 I ReactNativeJS: '[P2P Bootstrap] AppState transition to:', 'active', '(Transports kept active)'
+07-19 16:03:20.017  4392  4437 I ReactNativeJS: [P2P Bootstrap] Initializing transports for user: 858999f8-8268-44c6-89a2-77c51ad484cc
+07-19 16:03:20.017  4392  4437 I ReactNativeJS: [P2P Cleanup - Bootstrap] Starting robust P2P cleanup sequence...
+07-19 16:03:21.045  4392  4437 I ReactNativeJS: [P2P Cleanup] No Wi-Fi Direct group formed, skipping removeGroup.
+07-19 16:03:21.048  4392  4437 I ReactNativeJS: [P2P Permissions] API 36: scan=true connect=true advertise=true location=true wifi=true
+07-19 16:03:21.049  4392  4437 I ReactNativeJS: [P2P Bootstrap] Permission gate PASSED. All P2P permissions granted.
+07-19 16:03:21.051  4392  4437 I ReactNativeJS: [P2P Bootstrap] Location Services Enabled: true
+07-19 16:03:21.059  4392  4437 I ReactNativeJS: [BLE] Manager initialized successfully
+07-19 16:03:21.075  4392  4437 I ReactNativeJS: [BLE Advertiser] Advertising started (extended). Role: user, ID: 858999f8-8268-44c6-89a2-77c51ad484cc
+07-19 16:03:21.076  4392  4437 I ReactNativeJS: [P2P Bootstrap] STEP 3 INIT: Wi-Fi Direct listeners registered. Triggering initial discoverPeers...
+07-19 16:03:21.076  4392  4437 I ReactNativeJS: ℹ️  2026-07-19T11:03:21.076Z [INFO] BLE: Starting continuous scan session
+07-19 16:03:21.082  4392  4437 I ReactNativeJS: [Android Wi-Fi Direct] Peer discovery started via WifiP2pManager.
+07-19 16:03:27.832  4392  4437 I ReactNativeJS: '[P2P DEBUG] Wi-Fi Direct peers changed. Peers count:', 1, 'Peers:', [ { status: 3,
+07-19 16:03:27.832  4392  4437 I ReactNativeJS:     deviceAddress: '46:ea:30:07:ce:a5',
+07-19 16:03:27.832  4392  4437 I ReactNativeJS:     deviceName: 'Maryam\'s A32' } ]
+07-19 16:03:27.833  4392  4437 I ReactNativeJS: '[P2P DEBUG] Wi-Fi Direct peers changed. Peers count:', 1, 'Peers:', [ { status: 3,
+07-19 16:03:27.833  4392  4437 I ReactNativeJS:     deviceAddress: '46:ea:30:07:ce:a5',
+07-19 16:03:27.833  4392  4437 I ReactNativeJS:     deviceName: 'Maryam\'s A32' } ]
+07-19 16:03:27.834  4392  4437 I ReactNativeJS: [P2P DEBUG] Candidate 'Maryam's A32' name fallback: local='talha' remote='maryam' isInitiator=false
+07-19 16:03:27.834  4392  4437 I ReactNativeJS: [P2P DEBUG] We are not the initiator for any available candidate peer. Waiting for them to connect...
+07-19 16:03:31.235  4392  4437 I ReactNativeJS: '[P2P Bootstrap] AppState transition to:', 'background', '(Transports kept active)'
+07-19 16:03:31.239  4392  4437 I ReactNativeJS: '[P2P DEBUG] Connection Info Event received:', { groupFormed: false,
+07-19 16:03:31.239  4392  4437 I ReactNativeJS:   isGroupOwner: false,
+07-19 16:03:31.239  4392  4437 I ReactNativeJS:   groupOwnerAddress: '' }
+07-19 16:03:31.239  4392  4437 I ReactNativeJS: [P2P DEBUG] Group is not formed (info.groupFormed is false). Waiting for connection to establish...
+07-19 16:03:34.051  4392  4437 I ReactNativeJS: '[P2P Bootstrap] AppState transition to:', 'active', '(Transports kept active)'
+07-19 16:03:34.105  4392  4437 W ReactNativeJS: [expo-av]: Expo AV has been deprecated and will be removed in SDK 54. Use the `expo-audio` and `expo-video` packages to replace the required functionality.
+07-19 16:03:34.277  4392  4437 I ReactNativeJS: '[P2P DEBUG] Wi-Fi Direct peers changed. Peers count:', 1, 'Peers:', [ { status: 1,
+07-19 16:03:34.277  4392  4437 I ReactNativeJS:     deviceAddress: '46:ea:30:07:ce:a5',
+07-19 16:03:34.277  4392  4437 I ReactNativeJS:     deviceName: 'Maryam\'s A32' } ]
+07-19 16:03:34.278  4392  4437 I ReactNativeJS: '[P2P DEBUG] Wi-Fi Direct peers changed. Peers count:', 1, 'Peers:', [ { status: 1,
+07-19 16:03:34.278  4392  4437 I ReactNativeJS:     deviceAddress: '46:ea:30:07:ce:a5',
+07-19 16:03:34.278  4392  4437 I ReactNativeJS:     deviceName: 'Maryam\'s A32' } ]
+07-19 16:03:34.278  4392  4437 I ReactNativeJS: [P2P DEBUG] No new AVAILABLE peers to connect to.
+07-19 16:03:34.433  4392  4437 I ReactNativeJS: ℹ️  2026-07-19T11:03:34.433Z [INFO] BLE: State changed: on
+07-19 16:03:34.433  4392  4437 I ReactNativeJS: ℹ️  2026-07-19T11:03:34.433Z [INFO] BLE: Bluetooth turned on
+07-19 16:03:34.791  4392  4437 I ReactNativeJS: '[P2P Bootstrap] AppState transition to:', 'background', '(Transports kept active)'
+07-19 16:03:34.982  4392  4437 I ReactNativeJS: '[P2P Bootstrap] AppState transition to:', 'active', '(Transports kept active)'
+07-19 16:03:34.993  4392  4437 I ReactNativeJS: '[WebView Console Log]', '[Map] Initialized at 33.6844,73.0479'
+07-19 16:03:37.423  4392  4437 I ReactNativeJS: ℹ️  2026-07-19T11:03:37.423Z [INFO] BLE: State changed: on
+07-19 16:03:37.423  4392  4437 I ReactNativeJS: ℹ️  2026-07-19T11:03:37.423Z [INFO] BLE: Bluetooth turned on
+07-19 16:03:40.426  4392  4437 I ReactNativeJS: ℹ️  2026-07-19T11:03:40.426Z [INFO] BLE: State changed: on
+07-19 16:03:40.426  4392  4437 I ReactNativeJS: ℹ️  2026-07-19T11:03:40.426Z [INFO] BLE: Bluetooth turned on
+07-19 16:03:43.437  4392  4437 I ReactNativeJS: ℹ️  2026-07-19T11:03:43.437Z [INFO] BLE: State changed: on
+07-19 16:03:43.437  4392  4437 I ReactNativeJS: ℹ️  2026-07-19T11:03:43.437Z [INFO] BLE: Bluetooth turned on
+07-19 16:03:46.447  4392  4437 I ReactNativeJS: ℹ️  2026-07-19T11:03:46.447Z [INFO] BLE: State changed: on
+07-19 16:03:46.448  4392  4437 I ReactNativeJS: ℹ️  2026-07-19T11:03:46.448Z [INFO] BLE: Bluetooth turned on
+07-19 16:03:49.459  4392  4437 I ReactNativeJS: ℹ️  2026-07-19T11:03:49.459Z [INFO] BLE: State changed: on
+07-19 16:03:49.459  4392  4437 I ReactNativeJS: ℹ️  2026-07-19T11:03:49.459Z [INFO] BLE: Bluetooth turned on
+07-19 16:03:52.469  4392  4437 I ReactNativeJS: ℹ️  2026-07-19T11:03:52.469Z [INFO] BLE: State changed: on
+07-19 16:03:52.469  4392  4437 I ReactNativeJS: ℹ️  2026-07-19T11:03:52.469Z [INFO] BLE: Bluetooth turned on
+07-19 16:03:55.480  4392  4437 I ReactNativeJS: ℹ️  2026-07-19T11:03:55.479Z [INFO] BLE: State changed: on
+07-19 16:03:55.480  4392  4437 I ReactNativeJS: ℹ️  2026-07-19T11:03:55.480Z [INFO] BLE: Bluetooth turned on
+07-19 16:03:58.491  4392  4437 I ReactNativeJS: ℹ️  2026-07-19T11:03:58.491Z [INFO] BLE: State changed: on
+07-19 16:03:58.491  4392  4437 I ReactNativeJS: ℹ️  2026-07-19T11:03:58.491Z [INFO] BLE: Bluetooth turned on

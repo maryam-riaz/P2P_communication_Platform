@@ -1,5 +1,6 @@
 import { Database } from '@nozbe/watermelondb';
 import * as Location from 'expo-location';
+import { InteractionManager } from 'react-native';
 import { MobileRepository } from '../db/repository';
 import { KnownPeer, LocationLog } from '../db/models';
 import { Observable, Subject, map, combineLatest, startWith, throttleTime } from 'rxjs';
@@ -25,6 +26,8 @@ export class MapService {
   private peerLastSeenMap = new Map<string, number>();
   private rssiUpdateSubject = new Subject<void>();
   private cleanupIntervalId: ReturnType<typeof setInterval> | null = null;
+  private lastLocationBroadcastTime = 0;
+  private static LOCATION_THROTTLE_MS = 5000;
 
   constructor(private db: Database) {
     this.repository = new MobileRepository(db);
@@ -209,23 +212,32 @@ export class MapService {
   }
 
   private async handleLocationUpdate(coords: { latitude: number; longitude: number; accuracy: number }) {
+    // Always emit to the subject for immediate UI update (no DB write needed)
     this.myLocationSubject.next({
       latitude: coords.latitude,
       longitude: coords.longitude,
       accuracy: coords.accuracy,
     });
 
+    const now = Date.now();
+    if (now - this.lastLocationBroadcastTime < MapService.LOCATION_THROTTLE_MS) {
+      return; // Throttled — skip DB write and peer broadcast
+    }
+    this.lastLocationBroadcastTime = now;
+
     const localUser = await this.repository.getLocalUser();
     if (localUser) {
       const myDeviceId = (localUser._raw as any).device_id as string;
-      
-      // 1. Log coordinates locally
-      await this.repository.logLocation({
-        deviceId: myDeviceId,
-        lat: coords.latitude,
-        lng: coords.longitude,
-        accuracy: coords.accuracy,
-        source: 'gps',
+
+      // 1. Log coordinates locally (offload to InteractionManager)
+      InteractionManager.runAfterInteractions(() => {
+        this.repository.logLocation({
+          deviceId: myDeviceId,
+          lat: coords.latitude,
+          lng: coords.longitude,
+          accuracy: coords.accuracy,
+          source: 'gps',
+        }).catch(err => console.warn('[MapService] Failed to log location:', err));
       });
 
       // 2. Share coordinates with all active P2P sockets
@@ -239,12 +251,11 @@ export class MapService {
                 senderId: myDeviceId,
                 lat: coords.latitude,
                 lng: coords.longitude,
-                timestamp: Date.now()
+                timestamp: Date.now(),
               };
               await transport.send(JSON.stringify(payload));
-              console.log(`[MapService] Broadcasted coordinate update to peer ${peerId}`);
             } catch (err) {
-              console.warn(`[MapService] Failed to share location with peer ${peerId}:`, err);
+              // Transport might be stale — skip silently
             }
           }
         }

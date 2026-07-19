@@ -7,6 +7,7 @@ module.exports = {
       tsconfig: 'tsconfig.json'
     }]
   },
+  testTimeout: 10000,
   moduleNameMapper: {
     '^shared$': '<rootDir>/../shared/src',
     // Mock react-native and its sub-packages in the Node.js Jest environment.

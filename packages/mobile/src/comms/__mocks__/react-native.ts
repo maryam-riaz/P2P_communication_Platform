@@ -37,8 +37,37 @@ const _clientDisconnectedListeners: Array<() => void> = [];
 
 // ── Side-assignment tracking ─────────────────────────────────────────────────
 // Assigned lazily when the first TCP event is registered per emitter instance.
-const _tcpSideAssignments = new Map<object, 'server' | 'client'>();
+// Reset between tests to avoid side misassignment from global counter drift.
+let _tcpSideAssignments = new Map<object, 'server' | 'client'>();
 let _tcpSideCount = 0;
+
+export function _resetTcpMockState(): void {
+  // Remove ALL event listeners from old sockets before destroying them,
+  // so close/error events don't leak into the new test's listener arrays.
+  if (_serverSocket) {
+    _serverSocket.removeAllListeners();
+    _serverSocket.destroy();
+    _serverSocket = null;
+  }
+  if (_clientSocket) {
+    _clientSocket.removeAllListeners();
+    _clientSocket.destroy();
+    _clientSocket = null;
+  }
+  if (_server) {
+    _server.close();
+    _server = null;
+  }
+
+  _tcpSideAssignments = new Map();
+  _tcpSideCount = 0;
+  _serverConnectedListeners.length = 0;
+  _clientConnectedListeners.length = 0;
+  _serverDataListeners.length = 0;
+  _clientDataListeners.length = 0;
+  _serverDisconnectedListeners.length = 0;
+  _clientDisconnectedListeners.length = 0;
+}
 
 function _assignSide(self: object): 'server' | 'client' {
   if (!_tcpSideAssignments.has(self)) {
@@ -73,9 +102,7 @@ const WifiDirectMock = {
     return new Promise<void>((resolve, reject) => {
       _server = net.createServer((sock) => {
         _serverSocket = sock;
-        // Notify server-side transport a client connected
         _serverConnectedListeners.forEach((fn) => fn());
-        // Data arriving at server = sent BY the client
         sock.on('data', (buf) => {
           const b64 = buf.toString('base64');
           _serverDataListeners.forEach((fn) => fn(b64));
@@ -88,12 +115,14 @@ const WifiDirectMock = {
     });
   }),
 
-  /** Connects as TCP client. Resolves when connected. */
+  /** Connects as TCP client. Resolves when connected. Fires WifiDirectTcpConnected for the client side. */
   connectToSocket: jest.fn().mockImplementation((ip: string, port: number) => {
     return new Promise<void>((resolve, reject) => {
       _clientSocket = new net.Socket();
-      _clientSocket.connect(port, ip, () => resolve());
-      // Data arriving at client = sent BY the server
+      _clientSocket.connect(port, ip, () => {
+        _clientConnectedListeners.forEach((fn) => fn());
+        resolve();
+      });
       _clientSocket.on('data', (buf) => {
         const b64 = buf.toString('base64');
         _clientDataListeners.forEach((fn) => fn(b64));
@@ -120,9 +149,20 @@ const WifiDirectMock = {
   /** Closes sockets and server. */
   tcpDisconnect: jest.fn().mockImplementation(() => {
     return new Promise<void>((resolve) => {
-      _serverSocket?.destroy();
-      _clientSocket?.destroy();
-      _server?.close();
+      // Remove all event listeners BEFORE destroying, so async close/error
+      // events don't propagate to the listener arrays (which may now belong
+      // to a different test's transports).
+      if (_serverSocket) {
+        _serverSocket.removeAllListeners();
+        _serverSocket.destroy();
+      }
+      if (_clientSocket) {
+        _clientSocket.removeAllListeners();
+        _clientSocket.destroy();
+      }
+      if (_server) {
+        _server.close();
+      }
       _serverSocket = null;
       _clientSocket = null;
       _server = null;

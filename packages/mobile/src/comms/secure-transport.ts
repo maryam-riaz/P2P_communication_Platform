@@ -109,10 +109,7 @@ export class SecureTransport {
   private handshakeCallbacks: (() => void)[] = [];
   private rxBuffer = new ByteBuffer();
   private lastHandshakeSentTime = 0;
-  private handshakeRetryTimer: ReturnType<typeof setTimeout> | null = null;
-  private handshakeAttempts = 0;
   private disposed = false;
-  private handshakeRetryStartTime = 0;
 
   constructor(
     private rawTransport: PeerTransport,
@@ -125,7 +122,6 @@ export class SecureTransport {
     this.rawTransport.receive((data) => this.handleRawReceivedData(data));
     this.rawTransport.onDisconnect(() => {
       this.disposed = true;
-      this.clearHandshakeRetryTimer();
     });
   }
 
@@ -151,55 +147,14 @@ export class SecureTransport {
     }
 
     this.lastHandshakeSentTime = now;
-    this.handshakeAttempts += 1;
-    console.log(`[Secure Transport] Initiating unencrypted P2P public key exchange (attempt ${this.handshakeAttempts})...`);
+    console.log('[Secure Transport] Initiating unencrypted P2P public key exchange...');
     const keyMsg = `PUBKEY_EXCHANGE:${this.localPublicKeyHex}:${this.localDeviceId}:${this.localDisplayName}\n`;
 
     try {
       await this.rawTransport.send(strToBytes(keyMsg));
     } catch (err) {
-      console.warn('[Secure Transport] Handshake send failed; retrying once the transport is ready:', err);
-      this.scheduleHandshakeRetry();
+      console.warn('[Secure Transport] Handshake send failed:', err);
       return;
-    }
-
-    if (!this.handshakeCompleted) {
-      this.scheduleHandshakeRetry();
-    }
-  }
-
-  private scheduleHandshakeRetry(): void {
-    if (this.disposed || this.handshakeCompleted || this.handshakeRetryTimer) {
-      return;
-    }
-
-    if (this.handshakeRetryStartTime === 0) {
-      this.handshakeRetryStartTime = Date.now();
-    } else if (Date.now() - this.handshakeRetryStartTime > 15000) {
-      // Handshake has been retrying for more than 15s without success.
-      // The underlying connection is likely dead (half-open TCP socket).
-      // Disconnect to trigger cleanup and reconnection.
-      console.warn('[Secure Transport] Handshake retry timed out after 15s. Disconnecting dead transport.');
-      this.handshakeRetryStartTime = 0;
-      this.rawTransport.disconnect().catch(() => {});
-      return;
-    }
-
-    this.handshakeRetryTimer = setTimeout(() => {
-      this.handshakeRetryTimer = null;
-      if (!this.disposed && !this.handshakeCompleted) {
-        this.establishHandshake(true).catch((err) => {
-          console.warn('[Secure Transport] Handshake retry failed:', err);
-        });
-      }
-    }, 2000);
-  }
-
-  private clearHandshakeRetryTimer(): void {
-    this.handshakeRetryStartTime = 0;
-    if (this.handshakeRetryTimer) {
-      clearTimeout(this.handshakeRetryTimer);
-      this.handshakeRetryTimer = null;
     }
   }
 
@@ -297,7 +252,6 @@ export class SecureTransport {
         this.remoteDisplayName = parts[3]?.trim() || null;
       }
       this.handshakeCompleted = true;
-      this.clearHandshakeRetryTimer();
       console.log(`[Secure Transport] Handshake complete! Received remote ID: ${this.remoteDeviceId}, display name: ${this.remoteDisplayName}`);
 
       this.establishHandshake(true).catch((err) => {
@@ -376,7 +330,6 @@ export class SecureTransport {
   }
 
   async disconnect(): Promise<void> {
-    this.clearHandshakeRetryTimer();
     this.handshakeCompleted = false;
     this.remotePublicKeyHex = null;
     this.remoteDeviceId = null;

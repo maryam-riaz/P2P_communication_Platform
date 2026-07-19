@@ -92,6 +92,15 @@ export class AndroidWifiP2PTransport implements PeerTransport {
         }
       );
     }
+    // Diagnostic: listen for native Channel disconnect events (Finding 3 instrumentation)
+    if (staticWifiDirectEmitter) {
+      staticWifiDirectEmitter.addListener(
+        'WifiDirectChannelDisconnected',
+        () => {
+          console.warn('[Android Wi-Fi Direct] [ChannelListener] Native Channel disconnected event received — possible stale channel');
+        }
+      );
+    }
     console.log('[Android Wi-Fi Direct] Native WifiP2pManager initialized.');
   }
 
@@ -313,11 +322,11 @@ export class AndroidWifiP2PTransport implements PeerTransport {
     console.log(`[Android Wi-Fi Direct] Connecting TCP socket to ${ipAddress}:${port}`);
     this.setupNativeListeners();
     await WifiDirect.connectToSocket(ipAddress, port);
-    this.isConnectedFlag = true;
-    // Yield one microtask so the server-side WifiDirectTcpConnected event can
-    // fire and set isConnected() on the server transport before the test asserts.
+    // Do NOT set isConnectedFlag here — wait for the WifiDirectTcpConnected event
+    // to fire (handled in setupNativeListeners). This ensures the server has
+    // accepted the TCP connection before we start the handshake.
     await Promise.resolve();
-    console.log('[Android Wi-Fi Direct] TCP connection established to group owner.');
+    console.log('[Android Wi-Fi Direct] TCP connection initiated to group owner.');
   }
 
   // ─── PeerTransport Interface ───────────────────────────────────────────────

@@ -22,11 +22,15 @@ export const localDbMigrations = schemaMigrations({
       toVersion: 4,
       steps: [], // Schema bump for location_log.timestamp index (raw SQL on real devices)
     },
+    {
+      toVersion: 5,
+      steps: [], // Schema bump for sync_queue.created_at index (isIndexed in schema)
+    },
   ],
 });
 
 export const localDbSchema = appSchema({
-  version: 4,
+  version: 5,
   tables: [
     tableSchema({
       name: 'local_user',
@@ -98,7 +102,7 @@ export const localDbSchema = appSchema({
         { name: 'record_id', type: 'string' },
         { name: 'attempts', type: 'number' },
         { name: 'last_attempt_at', type: 'number', isOptional: true },
-        { name: 'created_at', type: 'number' },
+        { name: 'created_at', type: 'number', isIndexed: true },
       ],
     }),
   ],

@@ -1,4 +1,10 @@
 {
   "$schema": "https://opencode.ai/config.json","experimental": {
   "disable_paste_summary": true
+},
+  "mcpServers-react-native": {
+    "rn-dev": {
+      "command": "npx",
+      "args": ["-y", "react-native-dev-mcp"]
+    }
 }}

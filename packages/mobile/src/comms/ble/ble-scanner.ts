@@ -130,24 +130,27 @@ function onDiscoverPeripheral(peripheral: any): void {
 
     // Extract manufacturer data using our specific manufacturer ID key
     // react-native-ble-manager delivers manufacturerData as Record<string, CustomAdvertisingData>
-    // where the key is the 4-character hex string of the manufacturer ID (e.g., "ffff")
+    // where the key is the decimal string of the manufacturer ID (e.g., "65535" for 0xFFFF)
     let payloadBytes: number[] | undefined;
-    const mfgIdKey = DISASTER_P2P_MANUFACTURER_ID.toString(16).toLowerCase().padStart(4, '0');
+    const mfgIdKey = String(DISASTER_P2P_MANUFACTURER_ID); // "65535" — react-native-ble-manager uses decimal keys
     
-    if (advertising.manufacturerRawData?.bytes) {
-      payloadBytes = advertising.manufacturerRawData.bytes;
+    // Path 1: Try our specific manufacturer ID key first (correct, prefix-free path)
+    if (advertising.manufacturerData?.[mfgIdKey]?.bytes) {
+      payloadBytes = advertising.manufacturerData[mfgIdKey].bytes;
+      console.log(`[BLE] Extracted via manufacturerData[${mfgIdKey}].bytes (length=${payloadBytes!.length})`);
+    } else if (advertising.manufacturerRawData?.bytes) {
+      // Path 2: Fallback to raw data, slicing off the 4-byte manufacturer-ID prefix
+      payloadBytes = advertising.manufacturerRawData.bytes.slice(4);
+      console.log(`[BLE] Extracted via manufacturerRawData.bytes.slice(4) (length=${payloadBytes!.length})`);
     } else if (advertising.manufacturerData) {
-      // Try our specific manufacturer ID first
-      if (advertising.manufacturerData[mfgIdKey]?.bytes) {
-        payloadBytes = advertising.manufacturerData[mfgIdKey].bytes;
-      } else {
-        // Fallback: try first key (for compatibility)
-        const keys = Object.keys(advertising.manufacturerData);
-        if (keys.length > 0 && advertising.manufacturerData[keys[0]]?.bytes) {
-          payloadBytes = advertising.manufacturerData[keys[0]].bytes;
-        } else if (Array.isArray(advertising.manufacturerData)) {
-          payloadBytes = advertising.manufacturerData;
-        }
+      // Path 3: Fallback — try first key (for compatibility)
+      const keys = Object.keys(advertising.manufacturerData);
+      if (keys.length > 0 && advertising.manufacturerData[keys[0]]?.bytes) {
+        payloadBytes = advertising.manufacturerData[keys[0]].bytes;
+        console.log(`[BLE] Extracted via manufacturerData[${keys[0]}].bytes fallback (length=${payloadBytes!.length})`);
+      } else if (Array.isArray(advertising.manufacturerData)) {
+        payloadBytes = advertising.manufacturerData;
+        console.log(`[BLE] Extracted via manufacturerData array fallback (length=${payloadBytes!.length})`);
       }
     }
 
@@ -156,10 +159,22 @@ function onDiscoverPeripheral(peripheral: any): void {
       return;
     }
 
+    // Filter by RSSI — only process advertisements from nearby devices
+    // RSSI < -90 dBm is too weak for Wi-Fi Direct connection
+    const rssi = peripheral.rssi ?? 0;
+    if (rssi < -90) {
+      return; // Too far away — skip
+    }
+
     // Parse the payload (magic prefix validation happens inside parseAdvertisementPacket)
     const parsed = parseAdvertisementPacket(payloadBytes);
     if (!parsed) {
-      // Either wrong magic prefix (not our app) or unrecognized format — silently ignore
+      // Distinguish failure reason for debugging
+      if (payloadBytes.length >= 2 && payloadBytes[0] === 0x44 && payloadBytes[1] === 0x50) {
+        console.log(`[BLE] parseAdvertisementPacket returned null despite valid magic prefix — size mismatch (got ${payloadBytes.length} bytes, expected 21 or 23)`);
+      } else {
+        console.log(`[BLE] parseAdvertisementPacket returned null — not our app (magic prefix mismatch or no data). First bytes: [${payloadBytes.slice(0, 4).join(',')}], length=${payloadBytes.length}`);
+      }
       return;
     }
 
@@ -282,8 +297,8 @@ export async function startScanning(
 /**
  * Execute one continuous scan cycle.
  */
-const SCAN_ACTIVE_MS = 4000;
-const SCAN_SLEEP_MS = 8000;
+const SCAN_ACTIVE_MS = 8000;  // 8s scan (up from 4s)
+const SCAN_SLEEP_MS = 2000;   // 2s sleep (down from 8s) → 80% duty cycle
 
 let cycleInFlight = false;
 
@@ -298,9 +313,11 @@ async function executeScanCycle(): Promise<void> {
       seconds: 0,       // don't let native auto-stop; we control timing ourselves
       allowDuplicates: true, // We want continuous updates
       matchMode: 2, // MATCH_MODE_AGGRESSIVE
-      scanMode: 2,  // SCAN_MODE_BALANCED
-      legacy: false, // Critical: Set to false to discover BLE 5.0 Extended Advertising packets!
+      scanMode: 2,  // SCAN_MODE_LOW_LATENCY — fastest discovery at expense of battery
+      legacy: true, // Experiment: accept both legacy (BLE 4.x) and extended (BLE 5.0) advertisements
     });
+
+    console.log('[BLE] Scan started with legacy=true (accepting both BLE 4.x and 5.0 advertisements)');
 
     await new Promise(resolve => { scanTimer = setTimeout(resolve, SCAN_ACTIVE_MS); });
     

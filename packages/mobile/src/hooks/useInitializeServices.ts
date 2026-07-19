@@ -4,7 +4,7 @@ import { useDispatch } from 'react-redux';
 import { logout } from '../redux/slices/authSlice';
 import LokiJSAdapter from '@nozbe/watermelondb/adapters/lokijs';
 
-import { Platform, AppState, AppStateStatus } from 'react-native';
+import { Platform, AppState, AppStateStatus, InteractionManager } from 'react-native';
 import * as Location from 'expo-location';
 import { secureStore as SecureStore } from '../utils/secureStore';
 
@@ -121,6 +121,7 @@ export function useInitializeServices() {
       // more devices can still join that same group. Track which role we're
       // in so we know whether it's even valid to attempt another connection.
       let groupRole: 'unassigned' | 'owner' | 'client' = 'unassigned';
+      let isCleaningUp = false;
       let serverSocketBound = false;
       // Tracks the MAC of the peer we most recently called connectToPeer() for.
       // Used to populate entry.deviceAddress before the handshake reveals the logical deviceId.
@@ -137,7 +138,9 @@ export function useInitializeServices() {
       // where onPeersChanged never fires because the two devices weren't in the
       // same discovery window simultaneously.
       let discoveryRetryTimer: ReturnType<typeof setInterval> | null = null;
-      let groupFormationTimeout: ReturnType<typeof setTimeout> | null = null;
+        let groupFormationTimeout: ReturnType<typeof setTimeout> | null = null;
+        let advertiserHealthCheck: ReturnType<typeof setInterval> | null = null;
+        let serverSocketHealthCheck: ReturnType<typeof setInterval> | null = null;
 
       /**
        * Wires up a raw transport + its SecureTransport wrapper with all the
@@ -147,43 +150,62 @@ export function useInitializeServices() {
        */
       const performP2PCleanup = async (context: string) => {
         console.log(`[P2P Cleanup - ${context}] Starting robust P2P cleanup sequence...`);
+        isCleaningUp = true;
         connectingKeys.clear();
         try {
           await AndroidWifiP2PTransport.cancelConnect();
         } catch (e) {
           console.warn(`[P2P Cleanup] cancelConnect failed:`, e);
         }
-        await new Promise((resolve) => setTimeout(resolve, 500));
+        // Poll for groupFormed === false instead of blind wait
+        for (let i = 0; i < 3; i++) {
+          try {
+            const info = await Promise.race([
+              AndroidWifiP2PTransport.getConnectionInfo(),
+              new Promise<never>((_, reject) =>
+                setTimeout(() => reject(new Error('getConnectionInfo timeout')), 5000)
+              ),
+            ]);
+            if (!info.groupFormed) {
+              console.log(`[P2P Cleanup] Group confirmed not formed after cancelConnect (poll ${i + 1}).`);
+              break;
+            }
+          } catch (e) {
+            console.warn(`[P2P Cleanup] getConnectionInfo poll attempt ${i + 1} failed:`, e);
+          }
+          await new Promise((resolve) => setTimeout(resolve, 100));
+        }
 
         try {
           await AndroidWifiP2PTransport.clearPersistentGroups();
         } catch (e) {
           console.warn(`[P2P Cleanup] clearPersistentGroups failed:`, e);
         }
-        await new Promise((resolve) => setTimeout(resolve, 500));
 
         try {
           const info = await AndroidWifiP2PTransport.getConnectionInfo();
           if (!info.groupFormed) {
              console.log(`[P2P Cleanup] No Wi-Fi Direct group formed, skipping removeGroup.`);
+             isCleaningUp = false;
              return;
           }
         } catch (e) {
           console.warn(`[P2P Cleanup] Failed to check connection info:`, e);
         }
 
-        for (let attempt = 1; attempt <= 3; attempt++) {
+        for (let attempt = 1; attempt <= 2; attempt++) {
           try {
             await AndroidWifiP2PTransport.removeGroup();
             console.log(`[P2P Cleanup] removeGroup succeeded on attempt ${attempt}.`);
             break;
           } catch (err: any) {
             console.warn(`[P2P Cleanup] removeGroup attempt ${attempt} failed:`, err);
-            if (attempt < 3) {
-              await new Promise((resolve) => setTimeout(resolve, 600));
+            if (attempt < 2) {
+              await new Promise((resolve) => setTimeout(resolve, 300));
             }
           }
         }
+        isCleaningUp = false;
       };
 
       const setupPeerConnection = (
@@ -201,13 +223,22 @@ export function useInitializeServices() {
         };
         const scheduleHandshakeRecovery = () => {
           clearHandshakeRecovery();
-          // Watchdog only — SecureTransport handles its own retry internally.
-          // This interval self-cleans when the handshake completes or the
-          // raw transport disconnects, preventing stale timers.
+          let retryCount = 0;
           handshakeRecoveryTimer = setInterval(() => {
+            retryCount++;
+            const elapsed = retryCount * 5; // 5s per tick
             if (secure.isHandshakeComplete() || !raw.isConnected()) {
               clearHandshakeRecovery();
+              return;
             }
+            if (elapsed > 15) {
+              console.log(`[P2P][${connKey}] Handshake failed after 15s. Disconnecting.`);
+              clearHandshakeRecovery();
+              raw.disconnect().catch(() => {});
+              return;
+            }
+            console.log(`[P2P][${connKey}] Handshake retry (${elapsed}s elapsed)...`);
+            secure.establishHandshake(true).catch(() => {});
           }, 5000);
         };
 
@@ -332,13 +363,20 @@ export function useInitializeServices() {
               connectingKeys.clear();
             }
 
-            const peersRepo = new MobileRepository(db);
-            await peersRepo.addNewPeer({
-              deviceId: remoteId,
-              publicKey: remoteKey || '',
-              role: 'user',
-              trustStatus: 'trusted',
-              displayName: remoteName || undefined
+            // Offload DB write to avoid blocking UI
+            InteractionManager.runAfterInteractions(async () => {
+              try {
+                const peersRepo = new MobileRepository(db);
+                await peersRepo.addNewPeer({
+                  deviceId: remoteId,
+                  publicKey: remoteKey || '',
+                  role: 'user',
+                  trustStatus: 'trusted',
+                  displayName: remoteName || undefined
+                });
+              } catch (err) {
+                console.warn('[P2P] Failed to persist peer after handshake:', err);
+              }
             });
 
             try {
@@ -383,30 +421,35 @@ export function useInitializeServices() {
           }
           connectingKeys.delete(connKey);
 
+          // FAST PATH: If peer is still visible via BLE, attempt immediate reconnection
+          // without full P2P cleanup (which takes 2-5s). Only do full cleanup if no
+          // BLE peers are visible or we're the owner with no remaining connections.
+          const peerStillNearby = remoteId && Array.from(bleDiscoveredIds.values()).includes(remoteId);
+
           if (connectionsByKey.size === 0) {
             connectingKeys.clear();
-            // â”€â”€ Critical Reset â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-            // When ALL connections are gone we must fully reset the Wi-Fi Direct
-            // group state. Without this reset the group owner never re-opens its
-            // server socket (serverSocketBound stays true) and subsequent
-            // connection attempts fail silently â€” this was the root cause of the
-            // handshake not completing after an initial disconnect.
             serverSocketBound = false;
             groupRole = 'unassigned';
-            console.log('[P2P DEBUG] All connections gone. Resetting group state and triggering P2P cleanup...');
-            await performP2PCleanup('All Clients Disconnected').catch((err) =>
-              console.warn('[P2P DEBUG] performP2PCleanup after full disconnect failed:', err)
-            );
-          } else if (groupRole === 'client') {
-            // Only the client role is exclusive to one group; losing our one
-            // client connection frees us up to look for (or accept) another.
-            groupRole = 'unassigned';
-          }
 
-          console.log(`[P2P DEBUG][${connKey}] Disconnected. Triggering re-discovery...`);
-          AndroidWifiP2PTransport.discoverPeers().catch((err) =>
-            console.warn('[P2P DEBUG] Re-discovery after disconnect failed:', err)
-          );
+            if (peerStillNearby) {
+              // Fast reconnect: skip full cleanup, just re-trigger discovery
+              console.log(`[P2P DEBUG][${connKey}] Peer ${remoteId} still nearby. Fast reconnecting...`);
+              AndroidWifiP2PTransport.discoverPeers().catch(() => {});
+            } else {
+              // Full cleanup when peer is gone
+              console.log('[P2P DEBUG] Peer not nearby. Performing full P2P cleanup...');
+              await performP2PCleanup('All Clients Disconnected').catch((err) =>
+                console.warn('[P2P DEBUG] performP2PCleanup after full disconnect failed:', err)
+              );
+            }
+          } else if (groupRole === 'client') {
+            groupRole = 'unassigned';
+            // Client lost connection but other connections exist — re-discover
+            AndroidWifiP2PTransport.discoverPeers().catch(() => {});
+          } else {
+            // Owner still has other connections — just re-discover for the lost peer
+            AndroidWifiP2PTransport.discoverPeers().catch(() => {});
+          }
         });
 
         return entry;
@@ -489,7 +532,11 @@ export function useInitializeServices() {
         const pubKeyHash = publicKey.slice(0, 8);
         currentAdvertiser = new BleAdvertiser(deviceId, role, pubKeyHash, displayName);
         try {
-          await currentAdvertiser.startAdvertising();
+          const capability = await currentAdvertiser.startAdvertising();
+          console.log(`[P2P Bootstrap] BLE advertising started. Capability: ${capability}`);
+          if (capability === 'scan_only') {
+            console.warn('[P2P Bootstrap] BLE advertising degraded to scan-only. Device cannot advertise — peers will not discover us.');
+          }
         } catch (err) {
           console.warn('[P2P Bootstrap] Failed to start BLE advertising (check if Bluetooth is enabled):', err);
         }
@@ -499,6 +546,10 @@ export function useInitializeServices() {
         // ── Wire up Wi-Fi Direct Group formation listeners ──
         const handleConnectionInfo = async (info: any) => {
           console.log('[P2P DEBUG] Connection Info Event received:', info);
+          if (isCleaningUp) {
+            console.log('[P2P DEBUG] Connection info event suppressed — cleanup in progress.');
+            return;
+          }
           if (info.groupFormed) {
             let ownerAddress = info.groupOwnerAddress;
             const isOwner = info.isGroupOwner;
@@ -628,6 +679,21 @@ export function useInitializeServices() {
             serverSocketBound = false;
           }
         };
+
+        // Server socket health check — runs every 15s
+        const serverSocketHealthCheck = setInterval(async () => {
+          if (groupRole !== 'owner' || !serverSocketBound) return;
+          try {
+            const info = await AndroidWifiP2PTransport.getConnectionInfo();
+            if (!info.groupFormed) {
+              console.log('[P2P Health] Server socket health check: group dissolved. Resetting serverSocketBound.');
+              serverSocketBound = false;
+              groupRole = 'unassigned';
+            }
+          } catch (err) {
+            console.warn('[P2P Health] Server socket health check failed:', err);
+          }
+        }, 15_000);
 
         unsubConnectionInfo = AndroidWifiP2PTransport.onConnectionInfo(handleConnectionInfo);
 
@@ -894,6 +960,19 @@ export function useInitializeServices() {
           console.warn('[P2P Bootstrap] Failed to start BLE scanning (check if Bluetooth is enabled):', err);
         }
 
+        // Advertiser health check — restart advertising if it stopped
+        const advertiserHealthCheck = setInterval(async () => {
+          if (currentAdvertiser && !currentAdvertiser.getIsAdvertising()) {
+            console.warn('[P2P Health] BLE advertiser stopped. Restarting...');
+            try {
+              const capability = await currentAdvertiser.startAdvertising();
+              console.log(`[P2P Health] BLE advertiser restarted. Capability: ${capability}`);
+            } catch (err) {
+              console.warn('[P2P Health] Failed to restart BLE advertising:', err);
+            }
+          }
+        }, 60_000);
+
         // Safety timeout: if groupRole is still 'unassigned' after 60 seconds,
         // trigger a re-discovery cycle
         groupFormationTimeout = setTimeout(async () => {
@@ -932,6 +1011,12 @@ export function useInitializeServices() {
         if (currentAdvertiser) {
           await currentAdvertiser.stopAdvertising();
           currentAdvertiser = undefined;
+        }
+        if (advertiserHealthCheck) {
+          clearInterval(advertiserHealthCheck);
+        }
+        if (serverSocketHealthCheck) {
+          clearInterval(serverSocketHealthCheck);
         }
         await cleanupBleScanner();
         for (const entry of Array.from(connectionsByKey.values())) {
