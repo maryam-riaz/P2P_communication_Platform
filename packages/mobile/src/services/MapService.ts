@@ -24,9 +24,24 @@ export class MapService {
   private peerRssiMap = new Map<string, number>();
   private peerLastSeenMap = new Map<string, number>();
   private rssiUpdateSubject = new Subject<void>();
+  private cleanupIntervalId: ReturnType<typeof setInterval> | null = null;
 
   constructor(private db: Database) {
     this.repository = new MobileRepository(db);
+    // Periodic cleanup of stale location_log entries (every 30 minutes)
+    this.cleanupIntervalId = setInterval(() => {
+      this.repository.cleanupOldLocations().catch((err) => {
+        console.warn('[MapService] Location cleanup failed:', err);
+      });
+    }, 30 * 60 * 1000);
+  }
+
+  destroy(): void {
+    if (this.cleanupIntervalId) {
+      clearInterval(this.cleanupIntervalId);
+      this.cleanupIntervalId = null;
+    }
+    this.stopLocationTracking();
   }
 
   setChatService(chatService: ChatService) {

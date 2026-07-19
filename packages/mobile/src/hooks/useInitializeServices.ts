@@ -70,7 +70,6 @@ export function useInitializeServices() {
         adapter = new LokiJSAdapter({
           schema: localDbSchema,
           useWebWorker: false,
-          useIncrementalIndexedDB: false,
         });
       } else {
         const SQLiteAdapterClass = require('@nozbe/watermelondb/adapters/sqlite').default;
@@ -138,6 +137,7 @@ export function useInitializeServices() {
       // where onPeersChanged never fires because the two devices weren't in the
       // same discovery window simultaneously.
       let discoveryRetryTimer: ReturnType<typeof setInterval> | null = null;
+      let groupFormationTimeout: ReturnType<typeof setTimeout> | null = null;
 
       /**
        * Wires up a raw transport + its SecureTransport wrapper with all the
@@ -201,16 +201,14 @@ export function useInitializeServices() {
         };
         const scheduleHandshakeRecovery = () => {
           clearHandshakeRecovery();
+          // Watchdog only — SecureTransport handles its own retry internally.
+          // This interval self-cleans when the handshake completes or the
+          // raw transport disconnects, preventing stale timers.
           handshakeRecoveryTimer = setInterval(() => {
             if (secure.isHandshakeComplete() || !raw.isConnected()) {
               clearHandshakeRecovery();
-              return;
             }
-            console.log(`[P2P DEBUG][${connKey}] Handshake still pending. Retrying secure handshake...`);
-            secure.establishHandshake(true).catch((err) => {
-              console.warn(`[P2P DEBUG][${connKey}] Handshake retry failed:`, err);
-            });
-          }, 2000);
+          }, 5000);
         };
 
         const entry: PeerConnection = {
@@ -223,7 +221,12 @@ export function useInitializeServices() {
         connectionsByKey.set(connKey, entry);
         chatService.registerSecureTransport(secure);
 
-        secure.receive(async (plaintext) => {
+        secure.receive((plaintext) => {
+          // Defer all heavy processing off the critical JS thread to prevent
+          // UI freezes during rapid message arrival (e.g. file chunks).
+          // The actual parsing, DB writes, and relay sends happen on the
+          // next microtask/macrotask boundary.
+          setTimeout(async () => {
           console.log(`[P2P Connection][${connKey}] Encrypted payload successfully decrypted:`, plaintext);
           try {
             const payload = JSON.parse(plaintext);
@@ -312,6 +315,7 @@ export function useInitializeServices() {
           } catch (err) {
             console.error('Error handling incoming secure packet payload:', err);
           }
+          }, 0); // Defer to next event loop tick — keeps UI responsive
         });
 
         secure.onHandshakeReady(async () => {
@@ -363,7 +367,7 @@ export function useInitializeServices() {
           }
         });
 
-        raw.onDisconnect(() => {
+        raw.onDisconnect(async () => {
           clearHandshakeRecovery();
           const remoteId = entry.deviceId ?? secure.getRemoteDeviceId();
           if (remoteId) {
@@ -390,7 +394,7 @@ export function useInitializeServices() {
             serverSocketBound = false;
             groupRole = 'unassigned';
             console.log('[P2P DEBUG] All connections gone. Resetting group state and triggering P2P cleanup...');
-            performP2PCleanup('All Clients Disconnected').catch((err) =>
+            await performP2PCleanup('All Clients Disconnected').catch((err) =>
               console.warn('[P2P DEBUG] performP2PCleanup after full disconnect failed:', err)
             );
           } else if (groupRole === 'client') {
@@ -430,6 +434,14 @@ export function useInitializeServices() {
         connectingKeys.clear();
         groupRole = 'unassigned';
         serverSocketBound = false;
+        if (discoveryRetryTimer) {
+          clearInterval(discoveryRetryTimer);
+          discoveryRetryTimer = null;
+        }
+        if (groupFormationTimeout) {
+          clearTimeout(groupFormationTimeout);
+          groupFormationTimeout = null;
+        }
 
         // TDOWN: Always remove/disconnect any pre-existing native Wi-Fi Direct groups first!
         await performP2PCleanup('Bootstrap');
@@ -483,29 +495,11 @@ export function useInitializeServices() {
         }
 
         // === STEP 3: Wire up Wi-Fi Direct and BLE Discovery ===
-        // Create a deferred promise to track first peer IP resolution
-        let resolveFirstPeerIp: (() => void) | null = null;
-        let rejectFirstPeerIp: ((err: Error) => void) | null = null;
-        let firstPeerIpTimeout: ReturnType<typeof setTimeout> | null = null;
-        const firstPeerIpPromise = new Promise<void>((resolve, reject) => {
-          resolveFirstPeerIp = resolve;
-          rejectFirstPeerIp = reject;
-        });
-        let firstPeerIpResolved = false;
 
         // ── Wire up Wi-Fi Direct Group formation listeners ──
         const handleConnectionInfo = async (info: any) => {
           console.log('[P2P DEBUG] Connection Info Event received:', info);
           if (info.groupFormed) {
-            // Resolve the first-peer-IP promise so STEP 3 completes
-            if (!firstPeerIpResolved && resolveFirstPeerIp) {
-              firstPeerIpResolved = true;
-              resolveFirstPeerIp();
-              if (firstPeerIpTimeout) {
-                clearTimeout(firstPeerIpTimeout);
-                firstPeerIpTimeout = null;
-              }
-            }
             let ownerAddress = info.groupOwnerAddress;
             const isOwner = info.isGroupOwner;
 
@@ -598,8 +592,8 @@ export function useInitializeServices() {
                 clientEntry.deviceAddress = lastTargetMacAddress;
               }
 
-              // Retry with exponential backoff: 500ms, 1s, 2s, 4s, 8s
-              let delay = 500;
+              // Retry with exponential backoff: 200ms, 400ms, 800ms, 1.6s, 3.2s
+              let delay = 200;
               let connected = false;
               for (let attempt = 1; attempt <= 5 && !connected; attempt++) {
                 try {
@@ -611,14 +605,18 @@ export function useInitializeServices() {
                   console.log('[P2P DEBUG] Client establishing secure transport handshake...');
                   await secure.establishHandshake();
                 } catch (err: any) {
-                  delay = Math.min(delay * 2, 32000);
+                  delay = Math.min(delay * 2, 3200);
                   console.warn(`[P2P DEBUG] Attempt ${attempt}/5 failed: ${err.message || err}. Next retry in ${delay / 1000}s.`);
                   if (attempt === 5) {
                     console.error('[P2P DEBUG] Max connection retries reached. Group Owner unreachable. Resetting P2P group...');
-                    groupRole = 'unassigned';
                     connectingKeys.delete(finalKey);
                     connectionsByKey.delete(finalKey);
+                    // Immediately trigger re-discovery instead of waiting for periodic timer
+                    groupRole = 'unassigned';
                     await performP2PCleanup('Client Retry Max Failure');
+                    AndroidWifiP2PTransport.discoverPeers().catch((e) =>
+                      console.warn('[P2P DEBUG] Re-discovery after max retries failed:', e)
+                    );
                   }
                 }
               }
@@ -873,7 +871,7 @@ export function useInitializeServices() {
 
         // â”€â”€ Periodic discovery retry timer â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         // If onPeersChanged never fires (devices not in same discovery window),
-        // re-trigger discoverPeers every 30s while we're unassigned and have
+        // re-trigger discoverPeers every 10s while we're unassigned and have
         // at least one BLE-discovered peer we haven't connected to yet.
         if (discoveryRetryTimer) clearInterval(discoveryRetryTimer);
         discoveryRetryTimer = setInterval(async () => {
@@ -888,7 +886,7 @@ export function useInitializeServices() {
           } catch (err) {
             console.warn('[P2P DEBUG] Retry discoverPeers failed:', err);
           }
-        }, 30000);
+        }, 10000);
 
         try {
           await startScanning(handlePeerDiscovered);
@@ -896,20 +894,18 @@ export function useInitializeServices() {
           console.warn('[P2P Bootstrap] Failed to start BLE scanning (check if Bluetooth is enabled):', err);
         }
 
-        // === STEP 4: Await First Peer IP Resolution ===
-        // Wait up to 120s for the first Wi-Fi Direct group to form and
-        // the group owner IP to become available.
-        firstPeerIpTimeout = setTimeout(() => {
-          if (!firstPeerIpResolved && rejectFirstPeerIp) {
-            rejectFirstPeerIp(new Error('Timed out waiting for first peer IP resolution (120s)'));
+        // Safety timeout: if groupRole is still 'unassigned' after 60 seconds,
+        // trigger a re-discovery cycle
+        groupFormationTimeout = setTimeout(async () => {
+          if (groupRole === 'unassigned' && connectionsByKey.size === 0) {
+            console.log('[P2P Bootstrap] Group formation timeout (60s). Re-triggering discovery...');
+            try {
+              await AndroidWifiP2PTransport.discoverPeers();
+            } catch (err) {
+              console.warn('[P2P Bootstrap] Re-discovery after timeout failed:', err);
+            }
           }
-        }, 120000);
-        try {
-          await firstPeerIpPromise;
-          console.log('[P2P Bootstrap] STEP 4 COMPLETE: First peer IP resolved. Group formed.');
-        } catch (err) {
-          console.warn('[P2P Bootstrap] STEP 4 TIMEOUT: No peer IP resolved within 120s. Discovery may continue asynchronously:', err);
-        }
+        }, 60000);
       };
 
       /**
@@ -920,6 +916,10 @@ export function useInitializeServices() {
         if (discoveryRetryTimer) {
           clearInterval(discoveryRetryTimer);
           discoveryRetryTimer = null;
+        }
+        if (groupFormationTimeout) {
+          clearTimeout(groupFormationTimeout);
+          groupFormationTimeout = null;
         }
         if (unsubConnectionInfo) {
           unsubConnectionInfo();

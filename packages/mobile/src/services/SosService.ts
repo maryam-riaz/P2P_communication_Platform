@@ -2,7 +2,7 @@ import { Database, Q } from '@nozbe/watermelondb';
 import uuid from 'react-native-uuid';
 import { sha256 } from 'js-sha256';
 import { MobileRepository } from '../db/repository';
-import { SosEvent, LocalUser, KnownPeer } from '../db/models';
+import { SosEvent, LocalUser } from '../db/models';
 import { ChatService } from './ChatService';
 import { Observable, Subject } from 'rxjs';
 
@@ -64,10 +64,7 @@ export class SosService {
       status: 'open',
     });
 
-    // 2. Fetch all known peers from DB
-    const peers = await this.db.get<KnownPeer>('known_peers').query().fetch();
-
-    // 3. Format payload
+    // 2. Format payload
     const sosPayload = {
       id: sosId,
       type: 'sos',

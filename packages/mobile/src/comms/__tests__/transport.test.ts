@@ -102,9 +102,8 @@ describe('P2P Comms Transport Layer End-to-End Tests', () => {
     const deviceId = '11111111-2222-3333-4444-555555555555';
     const role = 'responder';
     const pkHash = 'abcdef12';
-    const timestamp = Math.floor(Date.now() / 1000);
 
-    const payload = packFullPayload(deviceId, role, pkHash, timestamp);
+    const payload = packFullPayload(deviceId, role, pkHash);
 
     // Verify size
     expect(payload.length).toBe(AD_PAYLOAD_SIZE_FULL);
@@ -123,19 +122,14 @@ describe('P2P Comms Transport Layer End-to-End Tests', () => {
     // Verify pk_hash (bytes 19-22)
     const pkHashHex = Buffer.from(payload.slice(19, 23)).toString('hex');
     expect(pkHashHex).toBe(pkHash);
-
-    // Verify timestamp (bytes 23-26)
-    const view = new DataView(payload.buffer, payload.byteOffset + 23, 4);
-    expect(view.getUint32(0, false)).toBe(timestamp);
   });
 
   it('should pack trimmed advertisement payload within legacy BLE limits', () => {
     const deviceId = '11111111-2222-3333-4444-555555555555';
     const role = 'user';
     const pkHash = 'abcdef12';
-    const timestamp = Math.floor(Date.now() / 1000);
 
-    const payload = packTrimmedPayload(deviceId, role, pkHash, timestamp);
+    const payload = packTrimmedPayload(deviceId, role, pkHash);
 
     // Verify size — must be 23 bytes (fits in 30/31 byte legacy packet)
     expect(payload.length).toBe(AD_PAYLOAD_SIZE_TRIMMED);

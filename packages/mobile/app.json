@@ -8,7 +8,16 @@
     ],
     "ios": {
       "supportsTabletMode": true,
-      "icon": "./assets/images/icon.png"
+      "icon": "./assets/images/icon.png",
+      "infoPlist": {
+        "UIBackgroundModes": [
+          "bluetooth-central",
+          "bluetooth-peripheral",
+          "processing"
+        ],
+        "NSBluetoothAlwaysUsageDescription": "This app uses Bluetooth to discover nearby peers for peer-to-peer messaging.",
+        "NSBluetoothPeripheralUsageDescription": "This app advertises as a Bluetooth peripheral so other devices can discover it."
+      }
     },
     "android": {
       "adaptiveIcon": {

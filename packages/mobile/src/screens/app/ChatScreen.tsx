@@ -108,6 +108,7 @@ export default function ChatScreen({ route, navigation }: any) {
   const [isPeerActive, setIsPeerActive] = useState(false);
   const [displayName, setDisplayName] = useState(recipientName);
   const flatListRef = useRef<FlatList>(null);
+  const isUserScrolledUp = useRef(false);
 
   // Subscribe to transfer progress updates
   useEffect(() => {
@@ -188,7 +189,11 @@ export default function ChatScreen({ route, navigation }: any) {
           const displayed = dbMessages.slice().reverse().map((m) => toDisplayMessage(m, localDeviceId));
           setMessages(displayed);
           // Scroll to bottom on new messages
-          setTimeout(() => flatListRef.current?.scrollToEnd({ animated: true }), 100);
+          setTimeout(() => {
+            if (!isUserScrolledUp.current) {
+              flatListRef.current?.scrollToEnd({ animated: true });
+            }
+          }, 100);
         },
         error: (err) => console.error('[ChatScreen] message stream error', err),
       });
@@ -726,6 +731,12 @@ export default function ChatScreen({ route, navigation }: any) {
     );
   };
 
+  const handleScroll = useCallback((event: any) => {
+    const { contentOffset, contentSize, layoutMeasurement } = event.nativeEvent;
+    const distanceFromBottom = contentSize.height - layoutMeasurement.height - contentOffset.y;
+    isUserScrolledUp.current = distanceFromBottom > 100;
+  }, []);
+
   return (
     <KeyboardAvoidingView
       behavior="padding"
@@ -788,6 +799,12 @@ export default function ChatScreen({ route, navigation }: any) {
           style={{ flex: 1 }}
           contentContainerStyle={styles.messageList}
           onContentSizeChange={() => flatListRef.current?.scrollToEnd({ animated: false })}
+          onScroll={handleScroll}
+          removeClippedSubviews={true}
+          maxToRenderPerBatch={10}
+          windowSize={5}
+          initialNumToRender={15}
+          extraData={{ transferProgress, playingAudioId }}
         />
       )}
 

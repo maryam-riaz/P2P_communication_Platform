@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "skills": {
+    "react-native-best-practices": {
+      "source": "callstackincubator/agent-skills",
+      "sourceType": "github",
+      "skillPath": "skills/react-native-best-practices/SKILL.md",
+      "computedHash": "35ef1d9d1d78def668b784ebc7a371a3b5e3374c428552da570507e6c4f2b50c"
+    },
+    "repo-cleanup": {
+      "source": "nickcrew/claude-ctx-plugin",
+      "sourceType": "github",
+      "skillPath": "skills/repo-cleanup/SKILL.md",
+      "computedHash": "a8d6e23c99f4c4634f0424da6100f80e6b2fe8f07482b58790a0bc58f17e8b2a"
+    }
+  }
+}

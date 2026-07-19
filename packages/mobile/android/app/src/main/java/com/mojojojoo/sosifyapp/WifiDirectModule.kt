@@ -22,6 +22,8 @@ import android.net.wifi.WifiManager
 import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothManager
 import android.os.Build
+import android.system.Os
+import android.system.OsConstants
 import com.facebook.react.bridge.Arguments
 import com.facebook.react.bridge.Promise
 import com.facebook.react.bridge.ReactApplicationContext
@@ -29,6 +31,7 @@ import com.facebook.react.bridge.ReactContextBaseJavaModule
 import com.facebook.react.bridge.ReactMethod
 import com.facebook.react.bridge.WritableArray
 import com.facebook.react.modules.core.DeviceEventManagerModule
+import java.io.FileDescriptor
 import java.io.InputStream
 import java.io.OutputStream
 import java.net.InetAddress
@@ -66,6 +69,9 @@ class WifiDirectModule(private val reactContext: ReactApplicationContext) :
         reactContext.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
     private lateinit var channel: Channel
     private var broadcastReceiver: WifiDirectBroadcastReceiver? = null
+
+    // High-power Wi-Fi lock — prevents OS from throttling the P2P radio link
+    private var wifiLock: android.net.wifi.WifiManager.WifiLock? = null
 
     // Wi-Fi Direct P2P network — captured after group formation and used to
     // bind TCP client sockets to the correct (non-internet) network interface.
@@ -171,6 +177,17 @@ class WifiDirectModule(private val reactContext: ReactApplicationContext) :
                 connectivityManager.registerNetworkCallback(networkRequest, p2pNetworkCallback!!)
             }
 
+            // Acquire a high-performance Wi-Fi lock to prevent the OS from
+            // throttling or disabling the P2P radio link during active transfers.
+            releaseWifiLock()
+            wifiLock = wifiManager.createWifiLock(
+                android.net.wifi.WifiManager.WIFI_MODE_FULL_HIGH_PERF,
+                "disaster-p2p-wifi-lock"
+            )
+            wifiLock?.setReferenceCounted(false)
+            wifiLock?.acquire()
+            android.util.Log.d("WifiDirectModule", "WifiLock (FULL_HIGH_PERF) acquired.")
+
             promise.resolve(null)
         } catch (e: Exception) {
             promise.reject("WIFI_DIRECT_INIT_ERROR", e.message, e)
@@ -180,6 +197,8 @@ class WifiDirectModule(private val reactContext: ReactApplicationContext) :
     @ReactMethod
     fun cleanup(promise: Promise) {
         try {
+            releaseWifiLock()
+            stopForegroundService()
             broadcastReceiver?.let { reactContext.unregisterReceiver(it) }
             broadcastReceiver = null
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
@@ -192,6 +211,40 @@ class WifiDirectModule(private val reactContext: ReactApplicationContext) :
         } catch (e: Exception) {
             promise.reject("WIFI_DIRECT_CLEANUP_ERROR", e.message, e)
         }
+    }
+
+    // ─── Wi-Fi Lock & Foreground Service ──────────────────────────────────────
+
+    private fun releaseWifiLock() {
+        try {
+            wifiLock?.let {
+                if (it.isHeld) it.release()
+                android.util.Log.d("WifiDirectModule", "WifiLock released.")
+            }
+        } catch (_: Exception) {}
+        wifiLock = null
+    }
+
+    private fun startForegroundService() {
+        try {
+            val intent = android.content.Intent(reactContext, P2pForegroundService::class.java)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                reactContext.startForegroundService(intent)
+            } else {
+                reactContext.startService(intent)
+            }
+            android.util.Log.d("WifiDirectModule", "P2pForegroundService started.")
+        } catch (e: Exception) {
+            android.util.Log.e("WifiDirectModule", "Failed to start foreground service", e)
+        }
+    }
+
+    private fun stopForegroundService() {
+        try {
+            val intent = android.content.Intent(reactContext, P2pForegroundService::class.java)
+            reactContext.stopService(intent)
+            android.util.Log.d("WifiDirectModule", "P2pForegroundService stopped.")
+        } catch (_: Exception) {}
     }
 
     // ─── Peer Discovery ───────────────────────────────────────────────────────
@@ -385,6 +438,10 @@ class WifiDirectModule(private val reactContext: ReactApplicationContext) :
     fun openServerSocket(port: Int, promise: Promise) {
         executor.execute {
             try {
+                // Ensure foreground service + wifi lock are active
+                startForegroundService()
+                ensureWifiLockHeld()
+
                 // Bind ServerSocket to the P2P interface's local IP if available
                 val p2pAddress = findP2pLocalAddress()
                 if (p2pAddress != null) {
@@ -400,14 +457,65 @@ class WifiDirectModule(private val reactContext: ReactApplicationContext) :
                 val sock = serverSocket!!.accept()
                 clientSocket = sock
                 outputStream = sock.getOutputStream()
-                sendEvent("WifiDirectTcpConnected", null)
 
+                configureTcpKeepalive(sock, "serverSocket")
+
+                sendEvent("WifiDirectTcpConnected", null)
                 readLoop(sock.getInputStream())
             } catch (e: Exception) {
                 if (serverSocket?.isClosed == false) {
                     promise.reject("TCP_SERVER_ERROR", e.message, e)
                 }
                 sendEvent("WifiDirectTcpDisconnected", null)
+            }
+        }
+    }
+
+    private fun ensureWifiLockHeld() {
+        try {
+            if (wifiLock == null || !wifiLock!!.isHeld) {
+                wifiLock = wifiManager.createWifiLock(
+                    android.net.wifi.WifiManager.WIFI_MODE_FULL_HIGH_PERF,
+                    "disaster-p2p-wifi-lock"
+                )
+                wifiLock?.setReferenceCounted(false)
+                wifiLock?.acquire()
+                android.util.Log.d("WifiDirectModule", "WifiLock (re)acquired via ensureWifiLockHeld.")
+            }
+        } catch (e: Exception) {
+            android.util.Log.e("WifiDirectModule", "Failed to ensure wifi lock held", e)
+        }
+    }
+
+    private fun configureTcpKeepalive(sock: Socket, tag: String) {
+        sock.keepAlive = true
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            try {
+                val implField = Socket::class.java.getDeclaredField("impl")
+                implField.isAccessible = true
+                val impl = implField.get(sock) ?: return
+                var clazz: Class<*> = impl.javaClass
+                var fd: FileDescriptor? = null
+                while (clazz != Any::class.java) {
+                    try {
+                        val fdField = clazz.getDeclaredField("fd")
+                        fdField.isAccessible = true
+                        @Suppress("UNCHECKED_CAST")
+                        fd = fdField.get(impl) as FileDescriptor
+                        break
+                    } catch (_: NoSuchFieldException) {
+                        clazz = clazz.superclass!!
+                    }
+                }
+                if (fd != null && fd.valid()) {
+                    // Linux TCP_KEEPIDLE=4, TCP_KEEPINTVL=5, TCP_KEEPCNT=6
+                    Os.setsockoptInt(fd, OsConstants.IPPROTO_TCP, 4, 2)
+                    Os.setsockoptInt(fd, OsConstants.IPPROTO_TCP, 5, 1)
+                    Os.setsockoptInt(fd, OsConstants.IPPROTO_TCP, 6, 5)
+                    android.util.Log.d("WifiDirectModule", "TCP keepalive configured on $tag (2s interval).")
+                }
+            } catch (e: Exception) {
+                android.util.Log.w("WifiDirectModule", "Failed to set TCP keepalive on $tag", e)
             }
         }
     }
@@ -426,6 +534,10 @@ class WifiDirectModule(private val reactContext: ReactApplicationContext) :
     fun connectToSocket(ipAddress: String, port: Int, promise: Promise) {
         executor.execute {
             try {
+                // Ensure foreground service + wifi lock are active
+                startForegroundService()
+                ensureWifiLockHeld()
+
                 val sock = Socket()
                 // Bind the socket to the Wi-Fi Direct P2P network so TCP
                 // segments go through the P2P interface, not mobile data.
@@ -438,6 +550,7 @@ class WifiDirectModule(private val reactContext: ReactApplicationContext) :
                         android.util.Log.w("WifiDirectModule", "No P2P network captured — socket may route through default network")
                     }
                 }
+                configureTcpKeepalive(sock, "clientSocket")
                 // Use a 15-second connect timeout to prevent indefinite
                 // blocking when the peer is unreachable.
                 sock.connect(InetSocketAddress(ipAddress, port), 15000)
@@ -485,6 +598,126 @@ class WifiDirectModule(private val reactContext: ReactApplicationContext) :
             promise.resolve(null)
         } catch (e: Exception) {
             promise.reject("TCP_DISCONNECT_ERROR", e.message, e)
+        }
+    }
+
+    /**
+     * Streams a file from disk directly to the TCP socket in native code,
+     * completely bypassing the React Native JS bridge for the payload bytes.
+     *
+     * The file is read in native chunks and written to the TCP socket's output stream.
+     * After the entire file is sent, the promise resolves with the total bytes sent.
+     */
+    @ReactMethod
+    fun tcpSendFile(filePath: String, chunkSize: Int = 262144, promise: Promise) {
+        val out = outputStream
+        if (out == null) {
+            promise.reject("TCP_NOT_CONNECTED", "No active TCP connection.")
+            return
+        }
+        executor.execute {
+            try {
+                var path = filePath
+                if (path.startsWith("file://")) path = path.substring(7)
+                val file = java.io.File(path)
+                if (!file.exists()) {
+                    promise.reject("FILE_NOT_FOUND", "File does not exist: $path")
+                    return@execute
+                }
+                val fileLen = file.length()
+                if (fileLen == 0L) { promise.resolve(0.0); return@execute }
+                val buf = ByteArray(chunkSize.coerceAtMost(fileLen.toInt().coerceAtMost(262144)))
+                var total: Long = 0
+                java.io.FileInputStream(file).use { fis ->
+                    var read: Int
+                    while (fis.read(buf).also { read = it } != -1) {
+                        out.write(buf, 0, read)
+                        total += read
+                    }
+                }
+                out.flush()
+                android.util.Log.d("WifiDirectModule", "tcpSendFile completed: $total bytes from $path")
+                promise.resolve(total.toDouble())
+            } catch (e: Exception) {
+                android.util.Log.e("WifiDirectModule", "tcpSendFile error", e)
+                promise.reject("TCP_SEND_FILE_ERROR", e.message, e)
+            }
+        }
+    }
+
+    /**
+     * Appends a base64-decoded chunk to a file on disk incrementally.
+     * Used by the JS layer to stream incoming file transfer chunks directly
+     * to storage instead of accumulating the entire file in JS memory.
+     *
+     * @param base64Chunk base64-encoded chunk bytes to append
+     * @param filePath    absolute path to the target file (created if missing)
+     */
+    @ReactMethod
+    fun tcpAppendChunk(base64Chunk: String, filePath: String, promise: Promise) {
+        executor.execute {
+            try {
+                val clean = if (base64Chunk.contains(","))
+                    base64Chunk.substring(base64Chunk.indexOf(",") + 1)
+                else base64Chunk
+                val decoded = android.util.Base64.decode(clean, android.util.Base64.NO_WRAP)
+                java.io.FileOutputStream(filePath, true).use { it.write(decoded); it.flush() }
+                promise.resolve(decoded.size.toDouble())
+            } catch (e: Exception) {
+                promise.reject("APPEND_CHUNK_ERROR", e.message, e)
+            }
+        }
+    }
+
+    /**
+     * Finalizes an incremental file transfer by renaming the temp file to
+     * its final name and returning the file:// URI.
+     */
+    @ReactMethod
+    fun tcpFinalizeFile(tempFilePath: String, finalName: String, promise: Promise) {
+        executor.execute {
+            try {
+                val tmp = java.io.File(tempFilePath)
+                if (!tmp.exists()) {
+                    promise.reject("FILE_NOT_FOUND", "Temp file missing: $tempFilePath")
+                    return@execute
+                }
+                val cacheDir = reactContext.cacheDir
+                val dest = java.io.File(cacheDir, finalName)
+                var uniqueDest = dest; var i = 1
+                while (uniqueDest.exists()) {
+                    val dot = finalName.lastIndexOf(".")
+                    val base = if (dot > 0) finalName.substring(0, dot) else finalName
+                    val ext = if (dot > 0) finalName.substring(dot) else ""
+                    uniqueDest = java.io.File(cacheDir, "${base}_$i$ext"); i++
+                }
+                val ok = tmp.renameTo(uniqueDest)
+                if (ok) {
+                    promise.resolve("file://" + uniqueDest.absolutePath)
+                } else {
+                    uniqueDest.outputStream().use { out -> tmp.inputStream().use { it.copyTo(out) } }
+                    tmp.delete()
+                    promise.resolve("file://" + uniqueDest.absolutePath)
+                }
+            } catch (e: Exception) {
+                promise.reject("FINALIZE_FILE_ERROR", e.message, e)
+            }
+        }
+    }
+
+    /**
+     * Creates a unique temporary file path in the cache directory.
+     */
+    @ReactMethod
+    fun createTempFilePath(prefix: String, promise: Promise) {
+        try {
+            val tmp = java.io.File(
+                reactContext.cacheDir,
+                "p2p_${prefix}_${java.util.UUID.randomUUID().toString().substring(0, 8)}.tmp"
+            )
+            promise.resolve(tmp.absolutePath)
+        } catch (e: Exception) {
+            promise.reject("CREATE_TEMP_ERROR", e.message, e)
         }
     }
 
@@ -536,8 +769,25 @@ class WifiDirectModule(private val reactContext: ReactApplicationContext) :
         val buffer = ByteArray(262144) // 256KB read buffer — reduces React Native bridge events by 64x
         try {
             var bytesRead: Int
-            while (input.read(buffer).also { bytesRead = it } != -1) {
-                val chunk = buffer.copyOf(bytesRead)
+            var offset = 0
+            var totalBuffered = 0
+            while (input.read(buffer, offset, buffer.size - offset).also { bytesRead = it } != -1) {
+                totalBuffered += bytesRead
+                // If we haven't filled the buffer, wait for more data
+                if (offset + bytesRead < buffer.size) {
+                    offset += bytesRead
+                    continue
+                }
+                // Buffer is full (or close to it) — flush as one bridge event
+                val chunk = buffer.copyOf(totalBuffered)
+                val b64 = android.util.Base64.encodeToString(chunk, android.util.Base64.NO_WRAP)
+                sendEvent("WifiDirectTcpData", b64)
+                offset = 0
+                totalBuffered = 0
+            }
+            // Flush any remaining bytes in the partial buffer
+            if (totalBuffered > 0) {
+                val chunk = buffer.copyOf(totalBuffered)
                 val b64 = android.util.Base64.encodeToString(chunk, android.util.Base64.NO_WRAP)
                 sendEvent("WifiDirectTcpData", b64)
             }
@@ -557,6 +807,9 @@ class WifiDirectModule(private val reactContext: ReactApplicationContext) :
         outputStream = null
         clientSocket = null
         serverSocket = null
+        // Release high-power Wi-Fi lock when no sockets remain
+        releaseWifiLock()
+        stopForegroundService()
     }
 
     // ─── Event Emitter ────────────────────────────────────────────────────────

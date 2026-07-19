@@ -29,7 +29,7 @@ let stopListener: EventSubscription | null = null;
 const lastProcessedAtMs = new Map<string, number>();
 
 /**
- * Parse a FULL 27-byte manufacturer data packet (from BLE 5.0 extended advertising).
+ * Parse a FULL 23-byte manufacturer data packet (from BLE 5.0 extended advertising).
  *
  * Format: [magic:2][device_id:16][role:1][pk_hash:4]
  */
@@ -50,7 +50,7 @@ function parseFullPayload(bytes: Uint8Array): BLEAdvertisementData | null {
 }
 
 /**
- * Parse a TRIMMED 23-byte manufacturer data packet (from legacy BLE advertising).
+ * Parse a TRIMMED 21-byte manufacturer data packet (from legacy BLE advertising).
  *
  * Format: [magic:2][device_id:16][role:1][pk_hash:2]
  * - pk_hash is only the first 2 bytes (less precise, but verified later in handshake)

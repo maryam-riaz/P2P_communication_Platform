@@ -18,11 +18,15 @@ export const localDbMigrations = schemaMigrations({
       toVersion: 3,
       steps: [], // Schema bump for recipient_id indexing
     },
+    {
+      toVersion: 4,
+      steps: [], // Schema bump for location_log.timestamp index (raw SQL on real devices)
+    },
   ],
 });
 
 export const localDbSchema = appSchema({
-  version: 3,
+  version: 4,
   tables: [
     tableSchema({
       name: 'local_user',

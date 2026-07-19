@@ -68,13 +68,10 @@ export class MobileRepository {
     trustStatus: string;
     displayName?: string;
   }): Promise<KnownPeer> {
-    return await this.db.write(async () => {
-      const peers = await this.db
-        .get<KnownPeer>('known_peers')
-        .query(Q.where('device_id', peerInfo.deviceId))
-        .fetch();
-      const existing = peers.length > 0 ? peers[0] : null;
+    // READ outside write lock to avoid deadlocks
+    const existing = await this.getPeer(peerInfo.deviceId);
 
+    return await this.db.write(async () => {
       if (existing) {
         await existing.update((record) => {
           const existingRaw = record._raw as any;
@@ -133,7 +130,7 @@ export class MobileRepository {
   async getMessagesByRecipient(recipientId: string): Promise<Message[]> {
     return await this.db
       .get<Message>('messages')
-      .query(Q.where('recipient_id', recipientId), Q.sortBy('created_at', Q.asc))
+      .query(Q.where('recipient_id', recipientId), Q.sortBy('created_at', Q.asc), Q.take(50))
       .fetch();
   }
 
@@ -249,6 +246,19 @@ export class MobileRepository {
         raw(record).last_attempt_at = 0;
         raw(record).created_at = Date.now();
       });
+    });
+  }
+
+  async cleanupOldLocations(olderThanMs: number = 24 * 60 * 60 * 1000): Promise<void> {
+    const cutoff = Date.now() - olderThanMs;
+    const stale = await this.db.get<LocationLog>('location_log')
+      .query(Q.where('timestamp', Q.lt(cutoff)))
+      .fetch();
+    if (stale.length === 0) return;
+    await this.db.write(async () => {
+      for (const loc of stale) {
+        await loc.destroyPermanently();
+      }
     });
   }
 

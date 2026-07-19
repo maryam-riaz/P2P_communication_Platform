@@ -27,7 +27,7 @@ export function uuidToBytes(uuid: string): Uint8Array {
 }
 
 /**
- * Packs the FULL manufacturer data payload (27 bytes) for BLE 5.0 extended advertising.
+ * Packs the FULL manufacturer data payload (23 bytes) for BLE 5.0 extended advertising.
  *
  * Payload format:
  * - magic:          2 bytes (0xD2 0x50 — app identification)
@@ -64,10 +64,10 @@ export function packFullPayload(
 }
 
 /**
- * Packs the TRIMMED manufacturer data payload (23 bytes) for legacy BLE advertising.
+ * Packs the TRIMMED manufacturer data payload (21 bytes) for legacy BLE advertising.
  *
  * Fits within the 31-byte legacy BLE limit:
- *   3 (flags) + 1+1+2+23 (manufacturer data AD) = 30/31 bytes (1 byte margin)
+ *   3 (flags) + 1+1+2+21 (manufacturer data AD) = 28/31 bytes (3 bytes margin)
  *
  * Payload format:
  * - magic:          2 bytes (0xD2 0x50 — app identification)
@@ -130,8 +130,8 @@ export class BleAdvertiser {
    * Starts BLE peripheral advertising via the native BleAdvertiserModule (Kotlin).
    *
    * The native module implements a tiered advertising strategy:
-   *   1. BLE 5.0 Extended Advertising (full 27-byte payload)
-   *   2. Legacy BLE Advertising (trimmed 23-byte payload)
+   *   1. BLE 5.0 Extended Advertising (full 23-byte payload)
+   *   2. Legacy BLE Advertising (trimmed 21-byte payload)
    *   3. Scan-only mode (device cannot advertise)
    *
    * In non-native environments (Jest / Node.js), the NativeBleAdvertiser will be null

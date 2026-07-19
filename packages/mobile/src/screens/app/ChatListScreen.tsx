@@ -66,7 +66,9 @@ export default function ChatListScreen() {
 
   // 3. Subscribe to active cryptographic connection IDs
   useEffect(() => {
-    const subscription = chatService.observeActiveTransportIds().subscribe({
+    const subscription = chatService.observeActiveTransportIds()
+      .pipe(throttleTime(1000, undefined, { leading: true, trailing: true }))
+      .subscribe({
       next: (ids) => {
         console.log('[ChatListScreen] Active connected peer IDs updated:', ids);
         setOnlinePeerIds(ids);

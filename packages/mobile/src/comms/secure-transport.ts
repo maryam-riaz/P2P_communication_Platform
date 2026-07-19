@@ -36,6 +36,68 @@ function base64ToBytes(b64: string): Uint8Array {
   return bytes;
 }
 
+/**
+ * A pre-allocated byte accumulator that avoids string concatenation overhead
+ * and binary-data corruption from TextDecoder round-trips.
+ * Grows in 8KB pages and supports scanning for a delimiter byte (0x0A = \n).
+ */
+class ByteBuffer {
+  private buffer: Uint8Array;
+  private length = 0;
+  private static readonly PAGE_SIZE = 8192;
+
+  constructor() {
+    this.buffer = new Uint8Array(ByteBuffer.PAGE_SIZE);
+  }
+
+  /** Append raw bytes. Grows the underlying buffer in page-sized chunks. */
+  append(data: Uint8Array): void {
+    const needed = this.length + data.length;
+    if (needed > this.buffer.length) {
+      const newSize = Math.ceil(needed / ByteBuffer.PAGE_SIZE) * ByteBuffer.PAGE_SIZE;
+      const newBuf = new Uint8Array(newSize);
+      newBuf.set(this.buffer.subarray(0, this.length));
+      this.buffer = newBuf;
+    }
+    this.buffer.set(data, this.length);
+    this.length += data.length;
+  }
+
+  /** Number of bytes currently in the buffer. */
+  get size(): number {
+    return this.length;
+  }
+
+  /**
+   * Extracts and removes a complete line (bytes up to first newline).
+   * Returns the line as bytes WITHOUT the trailing \n, or null if no \n found.
+   */
+  readLine(): Uint8Array | null {
+    const idx = this.indexOfNewline();
+    if (idx === -1) return null;
+    const line = this.buffer.slice(0, idx);
+    // Shift remaining data left (removing up to and including the \n)
+    const remaining = this.length - idx - 1;
+    if (remaining > 0) {
+      this.buffer.copyWithin(0, idx + 1, this.length);
+    }
+    this.length = remaining;
+    return line;
+  }
+
+  private indexOfNewline(): number {
+    for (let i = 0; i < this.length; i++) {
+      if (this.buffer[i] === 0x0a) return i;
+    }
+    return -1;
+  }
+
+  /** Truncate buffer to 0 (used on overflow). */
+  clear(): void {
+    this.length = 0;
+  }
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 
 export class SecureTransport {
@@ -45,11 +107,12 @@ export class SecureTransport {
   private handshakeCompleted = false;
   private onMessageCallback: ((plaintext: string) => void) | null = null;
   private handshakeCallbacks: (() => void)[] = [];
-  private rxBuffer = '';
+  private rxBuffer = new ByteBuffer();
   private lastHandshakeSentTime = 0;
   private handshakeRetryTimer: ReturnType<typeof setTimeout> | null = null;
   private handshakeAttempts = 0;
   private disposed = false;
+  private handshakeRetryStartTime = 0;
 
   constructor(
     private rawTransport: PeerTransport,
@@ -110,6 +173,18 @@ export class SecureTransport {
       return;
     }
 
+    if (this.handshakeRetryStartTime === 0) {
+      this.handshakeRetryStartTime = Date.now();
+    } else if (Date.now() - this.handshakeRetryStartTime > 15000) {
+      // Handshake has been retrying for more than 15s without success.
+      // The underlying connection is likely dead (half-open TCP socket).
+      // Disconnect to trigger cleanup and reconnection.
+      console.warn('[Secure Transport] Handshake retry timed out after 15s. Disconnecting dead transport.');
+      this.handshakeRetryStartTime = 0;
+      this.rawTransport.disconnect().catch(() => {});
+      return;
+    }
+
     this.handshakeRetryTimer = setTimeout(() => {
       this.handshakeRetryTimer = null;
       if (!this.disposed && !this.handshakeCompleted) {
@@ -117,10 +192,11 @@ export class SecureTransport {
           console.warn('[Secure Transport] Handshake retry failed:', err);
         });
       }
-    }, 1000);
+    }, 2000);
   }
 
   private clearHandshakeRetryTimer(): void {
+    this.handshakeRetryStartTime = 0;
     if (this.handshakeRetryTimer) {
       clearTimeout(this.handshakeRetryTimer);
       this.handshakeRetryTimer = null;
@@ -181,33 +257,34 @@ export class SecureTransport {
     await this.rawTransport.send(strToBytes(serialized));
   }
 
-  private static readonly MAX_BUFFER_SIZE = 8 * 1024 * 1024; // 8 MB
+  private static readonly MAX_BUFFER_BYTES = 8 * 1024 * 1024; // 8 MB
 
   private handleRawReceivedData(data: Uint8Array): void {
-    const chunkStr = bytesToStr(data);
-    this.rxBuffer += chunkStr;
+    this.rxBuffer.append(data);
 
     // Guard against runaway buffer growth (e.g. large attachment without newline terminator)
-    if (this.rxBuffer.length > SecureTransport.MAX_BUFFER_SIZE) {
+    if (this.rxBuffer.size > SecureTransport.MAX_BUFFER_BYTES) {
       console.error('[Secure Transport] rxBuffer exceeded 8MB limit. Clearing buffer to prevent OOM.');
-      this.rxBuffer = '';
+      this.rxBuffer.clear();
       return;
     }
 
-    let newlineIndex: number;
-    while ((newlineIndex = this.rxBuffer.indexOf('\n')) !== -1) {
-      const line = this.rxBuffer.substring(0, newlineIndex);
-      this.rxBuffer = this.rxBuffer.substring(newlineIndex + 1);
-
-      if (line.trim() !== '') {
+    let line: Uint8Array | null;
+    while ((line = this.rxBuffer.readLine()) !== null) {
+      if (line.length > 0) {
         this.processPacket(line);
       }
     }
   }
 
-  private processPacket(rawStr: string): void {
+  private processPacket(rawBytes: Uint8Array): void {
+    // Fast path: decode only for the first few bytes to detect message type.
+    // Avoid full decode for binary-heavy packets.
+    const firstBytes = bytesToStr(rawBytes.subarray(0, 64));
+
     // Case 1: Handshake identity exchange (unencrypted)
-    if (rawStr.startsWith('PUBKEY_EXCHANGE:')) {
+    if (firstBytes.startsWith('PUBKEY_EXCHANGE:')) {
+      const rawStr = bytesToStr(rawBytes);
       const match = rawStr.match(/^PUBKEY_EXCHANGE:([^:]+):([^:]+):(.*)$/);
       if (match) {
         this.remotePublicKeyHex = match[1]?.trim() || null;
@@ -223,22 +300,19 @@ export class SecureTransport {
       this.clearHandshakeRetryTimer();
       console.log(`[Secure Transport] Handshake complete! Received remote ID: ${this.remoteDeviceId}, display name: ${this.remoteDisplayName}`);
 
-      // Respond by triggering our own handshake key exchange. This must not be blocked by the
-      // cooldown because the other side needs to see the reply to complete its own handshake state.
       this.establishHandshake(true).catch((err) => {
         console.warn('[Secure Transport] Failed replying to public key exchange:', err);
       });
 
-      // Trigger all pending handshake ready callbacks
       this.handshakeCallbacks.forEach((cb) => cb());
       return;
     }
 
     // Case 2: Raw (unencrypted) file chunk — sent directly via rawTransport for speed.
     // Detected by the plain JSON 'type' field without an encryption envelope.
-    if (rawStr.startsWith('{"type":"chat_file_chunk"')) {
+    if (firstBytes.startsWith('{"type":"chat_file_chunk"')) {
       if (this.onMessageCallback) {
-        this.onMessageCallback(rawStr);
+        this.onMessageCallback(bytesToStr(rawBytes));
       }
       return;
     }
@@ -250,7 +324,7 @@ export class SecureTransport {
     }
 
     try {
-      // Deserialise the JSON envelope and convert every base64 field back to Uint8Array
+      const rawStr = bytesToStr(rawBytes);
       const envelope = JSON.parse(rawStr) as {
         payload: string;
         iv: string;
@@ -270,7 +344,6 @@ export class SecureTransport {
         content_hash:      base64ToBytes(envelope.content_hash),
       };
 
-      // Verify ECDSA signature and decrypt with AES-256-GCM
       const plaintextBytes = verifyAndDecrypt(packet, this.localPrivateKeyHex, envelope.skip_sig);
       const plaintext = bytesToStr(plaintextBytes);
 
