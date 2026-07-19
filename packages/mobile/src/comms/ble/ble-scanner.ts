@@ -28,6 +28,11 @@ let stateListener: EventSubscription | null = null;
 let stopListener: EventSubscription | null = null;
 const lastProcessedAtMs = new Map<string, number>();
 
+/** Convert Uint8Array segment to hex string. Hermes-safe (no Buffer). */
+function bytesToHex(bytes: Uint8Array | number[]): string {
+  return Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
 /**
  * Parse a FULL 23-byte manufacturer data packet (from BLE 5.0 extended advertising).
  *
@@ -36,9 +41,9 @@ const lastProcessedAtMs = new Map<string, number>();
 function parseFullPayload(bytes: Uint8Array): BLEAdvertisementData | null {
   if (bytes.length !== AD_PAYLOAD_SIZE_FULL) return null;
 
-  const device_id = Buffer.from(bytes.slice(2, 18)).toString('hex');
+  const device_id = bytesToHex(bytes.slice(2, 18));
   const role = bytes[18];
-  const public_key_hash = Buffer.from(bytes.slice(19, 23)).toString('hex');
+  const public_key_hash = bytesToHex(bytes.slice(19, 23));
 
   return {
     device_id,
@@ -58,9 +63,9 @@ function parseFullPayload(bytes: Uint8Array): BLEAdvertisementData | null {
 function parseTrimmedPayload(bytes: Uint8Array): BLEAdvertisementData | null {
   if (bytes.length !== AD_PAYLOAD_SIZE_TRIMMED) return null;
 
-  const device_id = Buffer.from(bytes.slice(2, 18)).toString('hex');
+  const device_id = bytesToHex(bytes.slice(2, 18));
   const role = bytes[18];
-  const public_key_hash = Buffer.from(bytes.slice(19, 21)).toString('hex');
+  const public_key_hash = bytesToHex(bytes.slice(19, 21));
 
   return {
     device_id,
@@ -87,7 +92,11 @@ export function parseAdvertisementPacket(data: string | Uint8Array | number[]): 
       if (data.length === AD_PAYLOAD_SIZE_FULL * 2 || data.length === AD_PAYLOAD_SIZE_TRIMMED * 2) {
         bytes = new Uint8Array(data.match(/.{1,2}/g)!.map(b => parseInt(b, 16)));
       } else {
-        bytes = new Uint8Array(Buffer.from(data, 'base64'));
+        const binaryStr = atob(data);
+        bytes = new Uint8Array(binaryStr.length);
+        for (let i = 0; i < binaryStr.length; i++) {
+          bytes[i] = binaryStr.charCodeAt(i);
+        }
       }
     } else if (Array.isArray(data)) {
       bytes = new Uint8Array(data);
