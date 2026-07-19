@@ -741,71 +741,11 @@ export function useInitializeServices() {
             return;
           }
 
-          // Initiator check: BLE-first resolution
-          // Priority:
-          //   1. live bleDiscoveredIds map  (never stale)
-          //   2. MAC-address lexicographic fallback
-          // known_peers DB is NOT used here: stale device_ids cause isInitiator=false deadlock.
-          let candidateToConnect: typeof candidates[0] | null = null;
-
-          for (const c of candidates) {
-            // 1. Live BLE map lookup — collision-safe compound key.
-            //
-            // BLE advertiser broadcasts local name "DP2P:Maryam:4ba05e47".
-            // We store bleDiscoveredIds with key "maryam:4ba05e47" -> fullDeviceId.
-            //
-            // Wi-Fi Direct shows "Maryam's A32". Extract the first word
-            // ("maryam") then scan the map for ALL keys starting with
-            // "maryam:" — gives us a list of candidates by that name.
-            // If there is exactly one, use it. If multiple (name collision),
-            // fall through to the name-based fallback.
-            const wifiName = c.deviceName;
-            const firstWordKey = wifiName.split(/['\s]/)[0].toLowerCase();
-            const blePrefix = firstWordKey + ':';
-
-            // Gather all BLE-map entries whose key starts with this prefix
-            const bleMatches: string[] = [];
-            for (const [key, val] of bleDiscoveredIds.entries()) {
-              if (key.startsWith(blePrefix)) bleMatches.push(val);
-            }
-
-            if (bleMatches.length === 1) {
-              // Unambiguous: exactly one BLE peer with this first name
-              const bleRemoteId = bleMatches[0];
-              const isInitiator = deviceId < bleRemoteId;
-              console.log(`[P2P DEBUG] Candidate '${wifiName}' resolved via BLE map => ${bleRemoteId.substring(0, 8)}. isInitiator=${isInitiator}`);
-              if (isInitiator) {
-                candidateToConnect = c;
-                break;
-              }
-              continue;
-            } else if (bleMatches.length > 1) {
-              console.log(`[P2P DEBUG] Candidate '${wifiName}' has ${bleMatches.length} BLE matches (name collision). Falling to name fallback.`);
-            }
-
-            // 2. Name-based fallback — symmetric & collision-safe.
-            // Compare the first word of our own display name with the
-            // first word of the Wi-Fi Direct peer name. Lower name wins.
-            const localFirstWord = displayName.split(/['\s]/)[0].toLowerCase();
-            let isInitiatorFallback: boolean;
-            if (localFirstWord !== firstWordKey) {
-              isInitiatorFallback = localFirstWord < firstWordKey;
-            } else {
-              // True name collision: fall back to MAC / UUID comparison
-              const localMac = AndroidWifiP2PTransport.localMacAddress?.toLowerCase() || deviceId.toLowerCase();
-              isInitiatorFallback = localMac < c.deviceAddress.toLowerCase();
-            }
-            console.log(`[P2P DEBUG] Candidate '${wifiName}' name fallback: local='${localFirstWord}' remote='${firstWordKey}' isInitiator=${isInitiatorFallback}`);
-            if (isInitiatorFallback) {
-              candidateToConnect = c;
-              break;
-            }
-          }
-
-          if (!candidateToConnect) {
-            console.log('[P2P DEBUG] We are not the initiator for any available candidate peer. Waiting for them to connect...');
-            return;
-          }
+          // No initiator check — both devices attempt connection.
+          // Wi-Fi Direct OS negotiation handles GO/client role assignment.
+          // The isAlreadyConnectedOrConnecting filter above prevents duplicates.
+          const candidateToConnect = candidates[0];
+          console.log(`[P2P DEBUG] Connecting to candidate '${candidateToConnect.deviceName}' (${candidateToConnect.deviceAddress}). OS handles role negotiation.`);
 
           connectingKeys.add(candidateToConnect.deviceAddress);
           // Remember the MAC so setupPeerConnection can populate entry.deviceAddress

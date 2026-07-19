@@ -129,10 +129,10 @@ function onDiscoverPeripheral(peripheral: any): void {
     if (!advertising) return;
 
     // Extract manufacturer data using our specific manufacturer ID key
-    // react-native-ble-manager delivers manufacturerData as Record<string, CustomAdvertisingData>
-    // where the key is the decimal string of the manufacturer ID (e.g., "65535" for 0xFFFF)
+    // Android DefaultPeripheral.java uses String.format("%04x", key) to build the key,
+    // so the key is a 4-digit hex string like "ffff".
     let payloadBytes: number[] | undefined;
-    const mfgIdKey = String(DISASTER_P2P_MANUFACTURER_ID); // "65535" — react-native-ble-manager uses decimal keys
+    const mfgIdKey = DISASTER_P2P_MANUFACTURER_ID.toString(16).padStart(4, '0'); // "ffff" — matches Android DefaultPeripheral.java hex format
     
     // Path 1: Try our specific manufacturer ID key first (correct, prefix-free path)
     if (advertising.manufacturerData?.[mfgIdKey]?.bytes) {
@@ -314,7 +314,7 @@ async function executeScanCycle(): Promise<void> {
       allowDuplicates: true, // We want continuous updates
       matchMode: 2, // MATCH_MODE_AGGRESSIVE
       scanMode: 2,  // SCAN_MODE_LOW_LATENCY — fastest discovery at expense of battery
-      legacy: true, // Experiment: accept both legacy (BLE 4.x) and extended (BLE 5.0) advertisements
+      legacy: false, // Experiment: accept both legacy (BLE 4.x) and extended (BLE 5.0) advertisements
     });
 
     console.log('[BLE] Scan started with legacy=true (accepting both BLE 4.x and 5.0 advertisements)');
