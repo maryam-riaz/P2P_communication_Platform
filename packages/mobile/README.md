@@ -1,50 +1,76 @@
-# Welcome to your Expo app 👋
+# Disaster P2P Monorepo
 
-This is an [Expo](https://expo.dev) project created with [`create-expo-app`](https://www.npmjs.com/package/create-expo-app).
+A disaster-resilient peer-to-peer communications network built with React Native (Expo) for mobile, with a Node.js backend and shared crypto/sync libraries.
 
-## Get started
+## Project Structure
 
-1. Install dependencies
-
-   ```bash
-   npm install
-   ```
-
-2. Start the app
-
-   ```bash
-   npx expo start
-   ```
-
-In the output, you'll find options to open the app in a
-
-- [development build](https://docs.expo.dev/develop/development-builds/introduction/)
-- [Android emulator](https://docs.expo.dev/workflow/android-studio-emulator/)
-- [iOS simulator](https://docs.expo.dev/workflow/ios-simulator/)
-- [Expo Go](https://expo.dev/go), a limited sandbox for trying out app development with Expo
-
-You can start developing by editing the files inside the **app** directory. This project uses [file-based routing](https://docs.expo.dev/router/introduction).
-
-## Get a fresh project
-
-When you're ready, run:
-
-```bash
-npm run reset-project
+```
+├── android/                  # Native Android project (Expo prebuild output)
+├── packages/
+│   ├── backend/              # Node.js backend server
+│   │   └── src/              # Server source (cache, db)
+│   ├── mobile/               # React Native (Expo) mobile app
+│   │   ├── app/              # Expo Router file-based routing entry
+│   │   ├── assets/           # Images, icons, splash screens
+│   │   ├── components/       # Reusable UI components
+│   │   ├── constants/        # Theme and app constants
+│   │   ├── scripts/          # Utility scripts
+│   │   └── src/
+│   │       ├── comms/        # P2P transport layer (BLE, Wi-Fi Direct, Multipeer)
+│   │       ├── context/      # React context providers
+│   │       ├── db/           # WatermelonDB local database
+│   │       ├── hooks/        # Custom React hooks
+│   │       ├── navigation/   # React Navigation stacks
+│   │       ├── redux/        # Redux store and slices
+│   │       ├── screens/      # App screens (app/, auth/)
+│   │       ├── services/     # Business logic services
+│   │       └── utils/        # Utilities and polyfills
+│   └── shared/               # Shared crypto & sync libraries
+│       └── src/
+│           ├── crypto/       # ECDH, ECDSA, AES-GCM, SHA-256 wrappers
+│           └── sync/         # Conflict-free merge logic
+├── CRYPTO.md                 # Cryptographic design specification
+├── SCHEMA.md                 # Database schema documentation
+├── TRANSPORT.md              # P2P transport layer design
+├── metro.config.js           # Metro bundler config (monorepo-aware)
+├── package.json              # Root workspace config
+├── pnpm-lock.yaml            # pnpm lock file
+└── pnpm-workspace.yaml       # pnpm workspace definition
 ```
 
-This command will move the starter code to the **app-example** directory and create a blank **app** directory where you can start developing.
+## Getting Started
 
-## Learn more
+### Prerequisites
 
-To learn more about developing your project with Expo, look at the following resources:
+- [Node.js](https://nodejs.org/) (v18+)
+- [pnpm](https://pnpm.io/) (workspace package manager)
+- [Android Studio](https://developer.android.com/studio) (for Android builds)
+- [Xcode](https://developer.apple.com/xcode/) (for iOS builds, macOS only)
 
-- [Expo documentation](https://docs.expo.dev/): Learn fundamentals, or go into advanced topics with our [guides](https://docs.expo.dev/guides).
-- [Learn Expo tutorial](https://docs.expo.dev/tutorial/introduction/): Follow a step-by-step tutorial where you'll create a project that runs on Android, iOS, and the web.
+### Install Dependencies
 
-## Join the community
+```bash
+pnpm install
+```
 
-Join our community of developers creating universal apps.
+### Start the Mobile App
 
-- [Expo on GitHub](https://github.com/expo/expo): View our open source platform and contribute.
-- [Discord community](https://chat.expo.dev): Chat with Expo users and ask questions.
+```bash
+pnpm android    # Android
+pnpm ios        # iOS (macOS only)
+```
+
+### Run Tests
+
+```bash
+pnpm test              # All packages
+pnpm test:shared       # Shared library only
+pnpm test:mobile       # Mobile app only
+pnpm test:backend      # Backend only
+```
+
+## Architecture Documentation
+
+- **[CRYPTO.md](./CRYPTO.md)** — Cryptographic design (ECDH key exchange, ECDSA signatures, AES-GCM encryption)
+- **[SCHEMA.md](./SCHEMA.md)** — Database schemas (WatermelonDB local + PostgreSQL/MongoDB server)
+- **[TRANSPORT.md](./TRANSPORT.md)** — P2P transport layer (BLE discovery, Wi-Fi Direct/Multipeer data transfer)

@@ -18,6 +18,21 @@ out/
 *.apks
 *.aab
 *.ipa
+ios/
+.kotlin/
+*.orig.*
+*.mobileprovision
+.metro-health-check*
+
+# Native Android build artifacts
+android/app/build/
+android/.gradle/
+android/build/
+*.iml
+*.hprof
+.cxx/
+*.jsbundle
+local.properties
 
 # Database & log files
 *.log
@@ -26,6 +41,11 @@ out/
 *.sqlite-shm
 *.sqlite-wal
 .watermelondb/
+
+# Debug / scratch files (crash dumps, logcat output, screenshots)
+*.stackdump
+logs/
+scratch/
 
 # IDEs, text editors, and OS files
 .DS_Store
@@ -43,3 +63,19 @@ out/
 .env.development.local
 .env.test.local
 .env.production.local
+
+# Test coverage
+coverage/
+
+# Lock files (pnpm only - this is a pnpm workspace)
+package-lock.json
+yarn.lock
+
+# TypeScript
+*.tsbuildinfo
+
+# OpenCode
+.opencode/
+
+# Claude Code
+.claude/

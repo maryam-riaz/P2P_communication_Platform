@@ -1,4 +1,6 @@
-import { Platform, LogBox } from 'react-native';
+import '../src/utils/polyfills';
+import { Platform, LogBox, StatusBar } from 'react-native';
+import HardwarePermissionModal from '../components/HardwarePermissionModal';
 import * as Crypto from 'expo-crypto';
 
 if (__DEV__) {
@@ -59,6 +61,8 @@ export default function RootLayout() {
       <SafeAreaProvider>
         <AppWithServices />
       </SafeAreaProvider>
+      <HardwarePermissionModal />
+      <StatusBar barStyle="light-content" />
     </Provider>
   );
 }
