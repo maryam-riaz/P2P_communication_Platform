@@ -5,6 +5,7 @@ import { MobileRepository } from '../db/repository';
 import { SosEvent, LocalUser, KnownPeer } from '../db/models';
 import { ChatService } from './ChatService';
 import { Observable, Subject } from 'rxjs';
+import { logger } from '../utils/logger';
 
 export interface SosFormData {
   lat: number;
@@ -85,7 +86,7 @@ export class SosService {
         try {
           await secureTransport.send(JSON.stringify(sosPayload));
         } catch (error) {
-          console.warn(`Failed to broadcast SOS to peer ${peerId}`, error);
+          logger.sos.warn(`Failed to broadcast SOS to peer ${peerId}`, { error: String(error) });
         }
       }
     }
@@ -132,7 +133,7 @@ export class SosService {
         };
         await secureTransport.send(JSON.stringify(assignmentMessage));
       } catch (err) {
-        console.warn(`Failed to send assignment notification back to victim`, err);
+        logger.sos.warn('Failed to send assignment notification back to victim', { error: String(err) });
       }
     }
   }

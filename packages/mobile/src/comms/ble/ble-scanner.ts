@@ -1,6 +1,7 @@
 import { BleManager, Device } from 'react-native-ble-plx';
 import { BleDevice, DISASTER_P2P_SERVICE_UUID, UserRole } from './ble-types';
 import { sharedBleManager } from './shared-ble-manager';
+import { logger } from '../../utils/logger';
 
 /**
  * Converts a 16-byte Uint8Array to a UUID string with dashes.
@@ -72,7 +73,7 @@ export class BleScanner {
   startScanning(): void {
     if (this.isScanning) return;
     this.isScanning = true;
-    console.log('[BLE Scanner] Periodic scanning started.');
+    logger.ble.info('Periodic scanning started');
 
     const startScan = () => {
       if (!this.isScanning) return;
@@ -81,7 +82,7 @@ export class BleScanner {
         { allowDuplicates: false },
         (error, device) => {
           if (error) {
-            console.error('[BLE Scanner] Scan error:', error);
+            logger.ble.error('Scan error', { error: String(error) });
             return;
           }
           if (device) {
@@ -120,7 +121,7 @@ export class BleScanner {
       this.scanTimer = null;
     }
     this.bleManager.stopDeviceScan();
-    console.log('[BLE Scanner] Scanning stopped.');
+    logger.ble.info('Scanning stopped');
   }
 
   /**
@@ -143,12 +144,12 @@ export class BleScanner {
       // Check if advertisement starts with our test/development company ID (0xFFFF)
       // and is exactly 27 bytes (2 bytes company ID + 25 bytes custom payload)
       if (rawBytes.length === 27 && rawBytes[0] === 0xFF && rawBytes[1] === 0xFF) {
-        console.log(`[BLE Scanner] Match found! MAC: ${device.id}, RSSI: ${device.rssi}`);
+        logger.ble.debug('Match found', { mac: device.id, rssi: device.rssi });
         const payload = rawBytes.subarray(2); // Skip company ID
         this.onAdvertisementReceived(payload, device.rssi ?? -100, device.name ?? null);
       }
     } catch (error) {
-      console.error('[BLE Scanner] Error parsing discovered device:', error);
+      logger.ble.error('Error parsing discovered device', { error: String(error) });
     }
   }
 
@@ -178,7 +179,7 @@ export class BleScanner {
         displayName,
       });
     } catch (error) {
-      console.error('[BLE Scanner] Error unpacking discovered advertisement', error);
+      logger.ble.error('Error unpacking advertisement', { error: String(error) });
     }
   }
 

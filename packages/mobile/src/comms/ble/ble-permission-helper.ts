@@ -1,4 +1,5 @@
 import { Platform, PermissionsAndroid } from 'react-native';
+import { logger } from '../../utils/logger';
 
 /**
  * Requests all permissions required for BLE advertising and scanning on Android.
@@ -36,7 +37,7 @@ export async function requestBlePermissions(): Promise<boolean> {
     );
 
     if (!allGranted) {
-      console.warn('[BLE Permissions] One or more Android 12+ BLE permissions denied:', results);
+      logger.ble.warn('BLE permissions denied', { results });
     }
     return allGranted;
   } else {
@@ -54,7 +55,7 @@ export async function requestBlePermissions(): Promise<boolean> {
 
     const granted = result === PermissionsAndroid.RESULTS.GRANTED;
     if (!granted) {
-      console.warn('[BLE Permissions] ACCESS_FINE_LOCATION denied — BLE scanning will not work.');
+      logger.ble.warn('ACCESS_FINE_LOCATION denied');
     }
     return granted;
   }

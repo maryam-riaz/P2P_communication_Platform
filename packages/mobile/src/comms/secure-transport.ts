@@ -4,6 +4,7 @@ import {
   encryptAndSign, 
   verifyAndDecrypt 
 } from 'shared';
+import { logger } from '../utils/logger';
 
 // ─── RN-safe helpers (no Buffer / Node globals) ───────────────────────────────
 
@@ -66,11 +67,11 @@ export class SecureTransport {
   async establishHandshake(): Promise<void> {
     const now = Date.now();
     if (now - this.lastHandshakeSentTime < 3000) {
-      console.log('[Secure Transport] Handshake request rate-limited (cooldown active).');
+      logger.sec.debug('Handshake request rate-limited (cooldown active)');
       return;
     }
     this.lastHandshakeSentTime = now;
-    console.log('[Secure Transport] Initiating unencrypted P2P public key exchange...');
+    logger.sec.info('Initiating P2P public key exchange');
     const keyMsg = `PUBKEY_EXCHANGE:${this.localPublicKeyHex}:${this.localDeviceId}:${this.localDisplayName}\n`;
     await this.rawTransport.send(strToBytes(keyMsg));
   }
@@ -137,7 +138,7 @@ export class SecureTransport {
 
     // Guard against runaway buffer growth (e.g. large attachment without newline terminator)
     if (this.rxBuffer.length > SecureTransport.MAX_BUFFER_SIZE) {
-      console.error('[Secure Transport] rxBuffer exceeded 8MB limit. Clearing buffer to prevent OOM.');
+      logger.sec.error('rxBuffer exceeded 8MB limit, clearing to prevent OOM');
       this.rxBuffer = '';
       return;
     }
@@ -161,11 +162,11 @@ export class SecureTransport {
       this.remoteDeviceId = parts[2]?.trim() || null;
       this.remoteDisplayName = parts[3]?.trim() || null;
       this.handshakeCompleted = true;
-      console.log(`[Secure Transport] Handshake complete! Received remote ID: ${this.remoteDeviceId}, display name: ${this.remoteDisplayName}`);
+      logger.sec.info('Handshake complete', { remoteId: this.remoteDeviceId, displayName: this.remoteDisplayName });
 
       // Respond by triggering our own handshake key exchange (will be rate-limited by 3s cooldown if we just sent one)
       this.establishHandshake().catch((err) => {
-        console.warn('[Secure Transport] Failed replying to public key exchange:', err);
+        logger.sec.warn('Failed replying to public key exchange', { error: String(err) });
       });
 
       // Trigger all pending handshake ready callbacks
@@ -184,7 +185,7 @@ export class SecureTransport {
 
     // Case 3: Encrypted JSON packet
     if (!this.handshakeCompleted) {
-      console.warn('[Secure Transport] Received data before identity exchange completed. Packet dropped.');
+      logger.sec.warn('Received data before identity exchange completed, packet dropped');
       return;
     }
 
@@ -217,7 +218,7 @@ export class SecureTransport {
         this.onMessageCallback(plaintext);
       }
     } catch (error) {
-      console.error('[Secure Transport] Error decrypting or verifying digital signature:', error);
+      logger.sec.error('Error decrypting or verifying signature', { error: String(error) });
     }
   }
 

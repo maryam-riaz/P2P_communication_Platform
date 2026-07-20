@@ -6,6 +6,7 @@ import { MobileRepository } from '../db/repository';
 import { Message, LocalUser, KnownPeer } from '../db/models';
 import { SecureTransport } from '../comms/secure-transport';
 import { BehaviorSubject, Observable, from, map, switchMap } from 'rxjs';
+import { logger } from '../utils/logger';
 
 
 export interface Conversation {
@@ -53,14 +54,14 @@ export class ChatService {
   }
 
   private updateTransferProgress(messageId: string, progress: number) {
-    console.log(`[ChatService] updateTransferProgress for ${messageId.substring(0, 8)}: ${progress}%`);
+    logger.chat.debug(`Transfer progress ${messageId.substring(0, 8)}: ${progress}%`);
     const current = { ...this.transferProgressSubject.value };
     current[messageId] = progress;
     this.transferProgressSubject.next(current);
   }
 
   private clearTransferProgress(messageId: string) {
-    console.log(`[ChatService] clearTransferProgress for ${messageId.substring(0, 8)}`);
+    logger.chat.debug(`Transfer progress cleared for ${messageId.substring(0, 8)}`);
     const current = { ...this.transferProgressSubject.value };
     delete current[messageId];
     this.transferProgressSubject.next(current);
@@ -70,14 +71,14 @@ export class ChatService {
   registerSecureTransport(transport: SecureTransport) {
     if (!this.secureTransportsList.includes(transport)) {
       this.secureTransportsList.push(transport);
-      console.log('[ChatService] SecureTransport registered. Current pool size:', this.secureTransportsList.length);
+      logger.chat.debug('SecureTransport registered', { poolSize: this.secureTransportsList.length });
     }
   }
 
   unregisterSecureTransport(transport: SecureTransport) {
     this.secureTransportsList = this.secureTransportsList.filter(t => t !== transport);
     this.transportHandshakeStartMap.delete(transport);
-    console.log('[ChatService] SecureTransport unregistered. Current pool size:', this.secureTransportsList.length);
+    logger.chat.debug('SecureTransport unregistered', { poolSize: this.secureTransportsList.length });
   }
 
   private startHeartbeatTimer() {
@@ -95,21 +96,21 @@ export class ChatService {
             const startTime = this.transportHandshakeStartMap.get(transport)!;
             // If the raw transport is connected but handshake fails to complete for > 30 seconds, disconnect and prune it
             if (now - startTime > 30000) {
-              console.log('[ChatService] Secure transport handshake timeout (>30s). Disconnecting stale raw transport.');
+              logger.chat.warn('Secure transport handshake timeout (>30s), disconnecting stale transport');
               this.transportHandshakeStartMap.delete(transport);
               try {
                 await transport.disconnect();
               } catch (err) {
-                console.warn('[ChatService] Error disconnecting timed-out transport:', err);
+                logger.chat.warn('Error disconnecting timed-out transport', { error: String(err) });
               }
               continue;
             }
           }
-          console.log('[ChatService] Self-Healing: Connected raw transport found without active handshake. Triggering handshake retry...');
+          logger.chat.info('Self-healing: triggering handshake retry for connected transport without handshake');
           try {
             await transport.establishHandshake();
           } catch (err) {
-            console.warn('[ChatService] Self-healing handshake retry failed:', err);
+            logger.chat.warn('Self-healing handshake retry failed', { error: String(err) });
           }
         } else {
           this.transportHandshakeStartMap.delete(transport);
@@ -121,7 +122,7 @@ export class ChatService {
         
         // If no data received for 25 seconds, assume peer went out of range or disconnected silently
         if (now - lastSeen > 25000) {
-          console.log(`[ChatService] Peer ${peerId} silent for more than 25s. Pruning transport.`);
+          logger.chat.warn(`Peer ${peerId} silent for >25s, pruning transport`);
           
           // Mark in-progress incoming file transfers from this peer as failed in the DB
           for (const [msgId, transfer] of Array.from(this.incomingFileTransfers.entries())) {
@@ -141,7 +142,7 @@ export class ChatService {
           try {
             await transport.disconnect();
           } catch (err) {
-            console.warn('[ChatService] Error disconnecting silent transport:', err);
+            logger.chat.warn('Error disconnecting silent transport', { error: String(err) });
           }
           this.unregisterActiveTransport(peerId);
         } else {
@@ -154,7 +155,7 @@ export class ChatService {
             };
             await transport.send(JSON.stringify(pingPayload));
           } catch (err) {
-            console.warn(`[ChatService] Failed sending heartbeat ping to ${peerId}:`, err);
+            logger.chat.warn(`Heartbeat ping failed for ${peerId}`, { error: String(err) });
           }
         }
       }
@@ -187,7 +188,7 @@ export class ChatService {
     if (this.heartbeatIntervalId !== null) {
       clearInterval(this.heartbeatIntervalId);
       this.heartbeatIntervalId = null;
-      console.log('[ChatService] Heartbeat timer stopped.');
+      logger.chat.info('Heartbeat timer stopped');
     }
   }
 
@@ -401,7 +402,7 @@ export class ChatService {
     // 2. Perform transmission asynchronously in the background.
     // Do not await this to allow immediate render of the message on the local chat screen.
     this.transmitMessageInBackground(message, text, recipientId, attachment).catch(err => {
-      console.warn('[ChatService] Background transmission failed:', err);
+      logger.chat.warn('Background transmission failed', { error: String(err) });
     });
 
     return message;
@@ -423,9 +424,9 @@ export class ChatService {
     if (!secureTransport) {
       const unhandshakedConn = this.secureTransportsList.find(t => t.isConnected() && !t.isHandshakeComplete());
       if (unhandshakedConn) {
-        console.log(`[ChatService] Outbox activity triggered self-healing handshake for recipient ${recipientId}`);
+        logger.chat.info('Outbox activity triggered self-healing handshake', { recipientId });
         unhandshakedConn.establishHandshake().catch(err => {
-          console.warn('[ChatService] Failed to establish handshake during sendMessage self-healing:', err);
+          logger.chat.warn('Failed to establish handshake during sendMessage self-healing', { error: String(err) });
         });
       }
     }
@@ -519,10 +520,10 @@ export class ChatService {
           });
         });
       } catch (error) {
-        console.warn(`Failed transmission to ${recipientId}, message remains pending.`, error);
+        logger.chat.warn(`Transmission failed to ${recipientId}, message remains pending`, { error: String(error) });
       }
     } else {
-      console.log(`Peer ${recipientId} offline or not handshaked. Message stored in outbox queue.`);
+      logger.chat.debug(`Peer ${recipientId} offline or not handshaked, message queued`);
     }
   }
 
@@ -564,10 +565,10 @@ export class ChatService {
               syncStatus: 'downloading', // Special status
               createdAt: Date.now()
             });
-            console.log(`[ChatService] Created placeholder for incoming file transfer ${messageId}`);
+            logger.chat.info('Created placeholder for incoming file transfer', { messageId });
           }
         } catch (err) {
-          console.warn('[ChatService] Failed to create database placeholder:', err);
+          logger.chat.warn('Failed to create database placeholder', { error: String(err) });
         }
       })();
       this.pendingPlaceholderWrites.set(messageId, placeholderPromise);
@@ -588,7 +589,7 @@ export class ChatService {
     } else if (type === 'chat_file_end') {
       const transfer = this.incomingFileTransfers.get(messageId);
       if (transfer) {
-        console.log(`[ChatService] Completed receiving chunked file: ${transfer.metadata.fileName}`);
+        logger.chat.info('Completed receiving chunked file', { fileName: transfer.metadata.fileName });
         const base64Data = transfer.chunks.join('');
         this.incomingFileTransfers.delete(messageId);
         this.clearTransferProgress(messageId);
@@ -620,10 +621,10 @@ export class ChatService {
               record.localSyncStatus = 'delivered'; // Update to delivered (received successfully)
             });
           });
-          console.log(`[ChatService] Updated placeholder message ${messageId} to delivered.`);
+          logger.chat.debug('Updated placeholder message to delivered', { messageId });
         } catch (err) {
           // If for some reason finding fails, save as new
-          console.log('[ChatService] Placeholder not found, saving as new.');
+          logger.chat.debug('Placeholder not found, saving as new');
           const chatPayload = {
             id: messageId,
             senderId: transfer.metadata.senderId,
@@ -654,12 +655,12 @@ export class ChatService {
     // Use the same hash scheme as sendMessage: (id + senderId + timestamp_number)
     const tsNum = typeof timestamp === 'number' ? timestamp : new Date(timestamp).getTime();
     const contentHash = sha256(id + senderId + tsNum);
-    console.log(`[ChatService] handleIncomingMessage check: id=${id}, senderId=${senderId}, recipientId=${recipientId}, contentHash=${contentHash}`);
+    logger.chat.debug('handleIncomingMessage dedup check', { id, senderId, recipientId, contentHash });
 
     // Duplicate message check
     const existing = await this.repository.getMessageByHash(contentHash);
     if (existing) {
-      console.log(`Duplicate message ${id} received. Dropped.`);
+      logger.chat.debug(`Duplicate message ${id} received, dropped`);
       // The sender may have re-sent this because our original ack never
       // arrived (connection dropped mid-flight, etc). Re-send the ack so
       // their copy isn't stuck showing as undelivered forever.
@@ -687,7 +688,7 @@ export class ChatService {
       syncStatus: 'delivered',
       createdAt: Date.now()
     });
-    console.log(`[ChatService] Successfully written incoming message to DB. ID: ${saved.id}, Sender: ${senderId}`);
+    logger.chat.info('Incoming message written to DB', { id: saved.id, senderId });
 
     // Let the original sender know their message actually arrived, so their
     // copy of it can move from 'sent' to 'delivered'.
@@ -711,7 +712,7 @@ export class ChatService {
       const ackPayload = { type: 'ack', messageId, senderId: originalSenderId };
       await transport.send(JSON.stringify(ackPayload));
     } catch (err) {
-      console.warn(`[ChatService] Failed to send delivery ack for message ${messageId}:`, err);
+      logger.chat.warn(`Failed to send delivery ack for message ${messageId}`, { error: String(err) });
     }
   }
 
@@ -723,7 +724,7 @@ export class ChatService {
   async markMessageDelivered(messageId: string): Promise<void> {
     const msg = await this.db.get<Message>('messages').find(messageId).catch(() => null);
     if (!msg) {
-      console.warn(`[ChatService] Received ack for unknown message ${messageId}`);
+      logger.chat.warn(`Received ack for unknown message ${messageId}`);
       return;
     }
     const rawMsg = msg._raw as any;
@@ -735,7 +736,7 @@ export class ChatService {
         record.localSyncStatus = 'delivered';
       });
     });
-    console.log(`[ChatService] Message ${messageId} marked as delivered.`);
+    logger.chat.debug(`Message ${messageId} marked as delivered`);
   }
 
   /**
@@ -766,7 +767,7 @@ export class ChatService {
     const secureTransport = this.getActiveTransport(peerId);
     if (!secureTransport || !secureTransport.isHandshakeComplete()) return;
 
-    console.log(`[ChatService] Retrying ${pending.length} pending/un-acked messages for peer ${peerId}`);
+    logger.chat.info(`Retrying ${pending.length} pending/un-acked messages for peer ${peerId}`);
     
     for (const msg of pending) {
       const rawMsg = msg._raw as any;
@@ -782,10 +783,10 @@ export class ChatService {
         }
         
         this.transmitMessageInBackground(msg, text, peerId, attachment).catch(err => {
-          console.warn(`Retry failed for message ${msg.id}`, err);
+          logger.chat.warn(`Retry failed for message ${msg.id}`, { error: String(err) });
         });
       } catch (err) {
-        console.warn(`Retry parsing failed for message ${msg.id}`, err);
+          logger.chat.warn(`Retry parsing failed for message ${msg.id}`, { error: String(err) });
       }
     }
   }

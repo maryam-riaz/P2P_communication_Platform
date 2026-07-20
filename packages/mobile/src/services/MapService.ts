@@ -4,6 +4,7 @@ import { MobileRepository } from '../db/repository';
 import { KnownPeer, LocationLog } from '../db/models';
 import { Observable, Subject, map, combineLatest, startWith, throttleTime } from 'rxjs';
 import { ChatService } from './ChatService';
+import { logger } from '../utils/logger';
 
 export interface PeerPin {
   deviceId: string;
@@ -65,7 +66,7 @@ export class MapService {
           accuracy: pos.coords.accuracy ?? 0,
         };
       } catch (posErr) {
-        console.warn('[MapService] getCurrentPositionAsync failed, trying last known position:', posErr);
+        logger.map.warn('getCurrentPositionAsync failed, trying last known position', { error: String(posErr) });
         try {
           const lastPos = await Location.getLastKnownPositionAsync();
           if (lastPos) {
@@ -76,14 +77,14 @@ export class MapService {
             };
           }
         } catch (lastPosErr) {
-          console.warn('[MapService] getLastKnownPositionAsync also failed:', lastPosErr);
+          logger.map.warn('getLastKnownPositionAsync also failed', { error: String(lastPosErr) });
         }
       }
 
       if (coords) {
         await this.handleLocationUpdate(coords);
       } else {
-        console.warn('[MapService] Could not resolve initial location. Falling back to default region.');
+        logger.map.warn('Could not resolve initial location, falling back to default region');
       }
 
       // Watch position every 10 seconds (regardless of whether initial fetch succeeded or failed)
@@ -102,7 +103,7 @@ export class MapService {
         }
       );
     } catch (e: any) {
-      console.warn('GPS location tracking error:', e);
+      logger.map.warn('GPS location tracking error', { error: String(e) });
       throw e;
     }
   }
@@ -167,7 +168,7 @@ export class MapService {
               lat = parsed.lat;
               lng = parsed.lng;
             } catch (err) {
-              console.warn('Failed to parse peer location JSON', err);
+              logger.map.warn('Failed to parse peer location JSON', { error: String(err) });
             }
           }
 
@@ -220,9 +221,9 @@ export class MapService {
                 timestamp: Date.now()
               };
               await transport.send(JSON.stringify(payload));
-              console.log(`[MapService] Broadcasted coordinate update to peer ${peerId}`);
+              logger.map.debug(`Broadcasted coordinate update to peer ${peerId}`);
             } catch (err) {
-              console.warn(`[MapService] Failed to share location with peer ${peerId}:`, err);
+              logger.map.warn(`Failed to share location with peer ${peerId}`, { error: String(err) });
             }
           }
         }

@@ -3,6 +3,7 @@ import { SecureTransport } from '../comms/secure-transport';
 import { ChatService } from './ChatService';
 import { PeerRegistry } from './PeerRegistry';
 import { AndroidWifiP2PTransport, WifiDirectPeer } from '../comms/wifi-direct/wifi-p2p-transport.android';
+import { logger } from '../utils/logger';
 
 export type ConnectionState = 
   | { status: 'discovered'; timestamp: number }
@@ -60,7 +61,7 @@ export class PeerConnectionManager {
     });
 
     this.started = true;
-    console.log('[PeerConnectionManager] Started');
+    logger.p2p.info('Started');
   }
 
   async stop(): Promise<void> {
@@ -80,7 +81,7 @@ export class PeerConnectionManager {
     this.stateListeners.clear();
     this.currentWifiPeers = [];
     this.started = false;
-    console.log('[PeerConnectionManager] Stopped');
+    logger.p2p.info('Stopped');
   }
 
   async destroy(): Promise<void> {
@@ -112,13 +113,13 @@ export class PeerConnectionManager {
   async initiateHandshake(deviceId: string): Promise<void> {
     const currentState = this.peerStates.get(deviceId);
     if (currentState && (currentState.status === 'handshake_initiated' || currentState.status === 'handshake_complete' || currentState.status === 'connected')) {
-      console.log(`[PeerConnectionManager] Peer ${deviceId.slice(0, 8)} already in handshake/connected, skipping`);
+      logger.p2p.debug(`Peer ${deviceId.slice(0, 8)} already in handshake/connected, skipping`);
       return;
     }
 
     const peer = this.deps!.peerRegistry.getPeer(deviceId);
     if (!peer) {
-      console.warn(`[PeerConnectionManager] Peer ${deviceId.slice(0, 8)} not in registry, cannot initiate handshake`);
+      logger.p2p.warn(`Peer ${deviceId.slice(0, 8)} not in registry, cannot initiate handshake`);
       return;
     }
 
@@ -138,7 +139,7 @@ export class PeerConnectionManager {
         throw new Error(`Could not resolve MAC address for deviceId ${deviceId.slice(0, 8)}`);
       }
 
-      console.log(`[PeerConnectionManager] Initiating WiFi Direct connection to ${deviceId.slice(0, 8)} (MAC: ${macAddress})`);
+      logger.p2p.info(`Initiating WiFi Direct connection to ${deviceId.slice(0, 8)}`, { macAddress });
       await this.deps!.wifiDirectTransport.connectToPeer(macAddress);
 
       // Wait for event-driven onConnectionInfo (not raw polling)
@@ -149,7 +150,7 @@ export class PeerConnectionManager {
 
       // Don't proceed if we're the group owner (GO handles inbound connections separately)
       if (connectionInfo.isGroupOwner) {
-        console.log(`[PeerConnectionManager] Peer ${deviceId.slice(0, 8)}: I am Group Owner, skipping outbound connect`);
+        logger.p2p.debug(`Peer ${deviceId.slice(0, 8)}: I am Group Owner, skipping outbound connect`);
         this.setState(deviceId, { status: 'idle' });
         return;
       }
@@ -170,7 +171,7 @@ export class PeerConnectionManager {
       secureTransport.onHandshakeReady(() => {
         const remoteId = secureTransport.getRemoteDeviceId();
         if (remoteId) {
-          console.log(`[PeerConnectionManager] Handshake completed for peer ${remoteId.slice(0, 8)}`);
+          logger.p2p.info(`Handshake completed for peer ${remoteId.slice(0, 8)}`);
           this.setState(deviceId, { status: 'connected', timestamp: Date.now(), secureTransport, lastActivity: Date.now() });
         }
       });
@@ -187,13 +188,13 @@ export class PeerConnectionManager {
       }
 
       this.handshakeFailureTimestamps.delete(deviceId);
-      console.log(`[PeerConnectionManager] Handshake completed for peer ${deviceId.slice(0, 8)}`);
+      logger.p2p.info(`Handshake completed for peer ${deviceId.slice(0, 8)}`);
 
     } catch (error: any) {
       if (error.name === 'AbortError') {
-        console.warn(`[PeerConnectionManager] Handshake timed out for peer ${deviceId.slice(0, 8)}`);
+        logger.p2p.warn(`Handshake timed out for peer ${deviceId.slice(0, 8)}`);
       } else {
-        console.warn(`[PeerConnectionManager] Handshake failed for peer ${deviceId.slice(0, 8)}:`, error);
+        logger.p2p.warn(`Handshake failed for peer ${deviceId.slice(0, 8)}`, { error: String(error) });
       }
       this.handshakeFailureTimestamps.set(deviceId, Date.now());
       await this.handleHandshakeFailure(deviceId, error as Error);
@@ -208,7 +209,7 @@ export class PeerConnectionManager {
 
     const attempt = currentState.attempt;
     if (attempt >= 5) {
-      console.log(`[PeerConnectionManager] Max retries reached for peer ${deviceId.slice(0, 8)}, cleaning up`);
+      logger.p2p.info(`Max retries reached for peer ${deviceId.slice(0, 8)}, cleaning up`);
       await this.teardownConnection(deviceId);
       return;
     }
@@ -216,7 +217,7 @@ export class PeerConnectionManager {
     const backoffDelays = [200, 400, 800, 1600, 3200];
     const delay = backoffDelays[attempt - 1] || 3200;
 
-    console.log(`[PeerConnectionManager] Retrying handshake for peer ${deviceId.slice(0, 8)} in ${delay}ms (attempt ${attempt + 1})`);
+    logger.p2p.info(`Retrying handshake for peer ${deviceId.slice(0, 8)} in ${delay}ms`, { attempt: attempt + 1 });
     
     this.setState(deviceId, { 
       status: 'handshake_initiated', 
@@ -288,19 +289,19 @@ export class PeerConnectionManager {
 
     if (currentState && currentState.status === 'lost') {
       clearTimeout(currentState.gracePeriodTimer);
-      console.log(`[PeerConnectionManager] Peer ${peer.id.slice(0, 8)} rediscovered during grace period, canceling cleanup`);
+      logger.p2p.debug(`Peer ${peer.id.slice(0, 8)} rediscovered during grace period, canceling cleanup`);
     }
 
     // Fast-reconnect debounce: if last handshake failed <5s ago, skip (avoid rapid-fire)
     const lastFailure = this.handshakeFailureTimestamps.get(peer.id);
     if (lastFailure && Date.now() - lastFailure < 5000) {
-      console.log(`[PeerConnectionManager] Peer ${peer.id.slice(0, 8)} recently failed, debouncing reconnect`);
+      logger.p2p.debug(`Peer ${peer.id.slice(0, 8)} recently failed, debouncing reconnect`);
       return;
     }
 
     this.setState(peer.id, { status: 'discovered', timestamp: Date.now() });
     this.initiateHandshake(peer.id).catch(err => {
-      console.warn(`[PeerConnectionManager] Failed to initiate handshake for peer ${peer.id.slice(0, 8)}:`, err);
+      logger.p2p.warn(`Failed to initiate handshake for peer ${peer.id.slice(0, 8)}`, { error: String(err) });
     });
   }
 
@@ -324,7 +325,7 @@ export class PeerConnectionManager {
       }, 3000);
 
       this.setState(deviceId, { status: 'lost', timestamp: Date.now(), gracePeriodTimer });
-      console.log(`[PeerConnectionManager] Peer ${deviceId.slice(0, 8)} lost, starting 3s grace period`);
+      logger.p2p.info(`Peer ${deviceId.slice(0, 8)} lost, starting 3s grace period`);
     } else if (currentState.status === 'handshake_initiated') {
       currentState.abortController.abort();
       this.teardownConnection(deviceId).catch(() => {});
@@ -354,9 +355,9 @@ export class PeerConnectionManager {
         await connectedState.secureTransport.disconnect();
         this.deps!.chatService.unregisterActiveTransport(deviceId);
         this.deps!.chatService.unregisterSecureTransport(connectedState.secureTransport);
-        console.log(`[PeerConnectionManager] Disconnected secure transport for peer ${deviceId.slice(0, 8)}`);
+        logger.p2p.info(`Disconnected secure transport for peer ${deviceId.slice(0, 8)}`);
       } catch (err) {
-        console.warn(`[PeerConnectionManager] Error disconnecting transport for peer ${deviceId.slice(0, 8)}:`, err);
+        logger.p2p.warn(`Error disconnecting transport for peer ${deviceId.slice(0, 8)}`, { error: String(err) });
       }
     }
 
@@ -370,7 +371,7 @@ export class PeerConnectionManager {
     for (const peer of peers) {
       const state = this.peerStates.get(peer.id);
       if (!state || state.status === 'idle' || state.status === 'lost') {
-        console.log(`[PeerConnectionManager] Reconciling peer ${peer.id.slice(0, 8)}, initiating handshake`);
+        logger.p2p.debug(`Reconciling peer ${peer.id.slice(0, 8)}, initiating handshake`);
         await this.initiateHandshake(peer.id);
       }
     }

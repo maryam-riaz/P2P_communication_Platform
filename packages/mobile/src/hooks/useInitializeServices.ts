@@ -21,6 +21,7 @@ import { AuthService } from '../services/AuthService';
 import { ChatService } from '../services/ChatService';
 import { MapService } from '../services/MapService';
 import { SosService } from '../services/SosService';
+import { logger, enableFileLogging } from '../utils/logger';
  
 export interface Services {
   authService: AuthService;
@@ -56,6 +57,8 @@ export function useInitializeServices() {
     let db: Database;
  
     const initAsync = async () => {
+      enableFileLogging(true);
+      logger.sys.info('Service bootstrap starting');
       // SQLiteAdapter requires the WMDatabaseBridge native module compiled into the app binary.
       // In Expo Go this native module is absent, so we fall back to the pure-JS LokiJS adapter.
       const { NativeModules } = require('react-native');
@@ -74,7 +77,7 @@ export function useInitializeServices() {
           schema: localDbSchema,
           migrations: localDbMigrations,
           dbName: 'disaster_p2p_db',
-          onSetUpError: (error: any) => console.error('WatermelonDB SQLite setup failed:', error),
+          onSetUpError: (error: any) => logger.db.error('WatermelonDB SQLite setup failed', { error: String(error) }),
         });
       }
  
@@ -94,7 +97,7 @@ export function useInitializeServices() {
  
       // Initialize Wifi Direct static layer at startup
       AndroidWifiP2PTransport.initialize().catch((err) => {
-        console.warn('[P2P Bootstrap] Failed to initialize static Wi-Fi Direct:', err);
+        logger.p2p.warn('Failed to initialize static Wi-Fi Direct', { error: String(err) });
       });
  
       // Context state holders for dynamic P2P setup
@@ -143,29 +146,29 @@ export function useInitializeServices() {
        * group-owner's inbound socket and a client's outbound socket.
        */
       const performP2PCleanup = async (context: string) => {
-        console.log(`[P2P Cleanup - ${context}] Starting robust P2P cleanup sequence...`);
+        logger.p2p.info(`P2P cleanup starting (${context})`);
         connectingKeys.clear();
         try {
           await AndroidWifiP2PTransport.cancelConnect();
         } catch (e) {
-          console.warn(`[P2P Cleanup] cancelConnect failed:`, e);
+          logger.p2p.warn('cancelConnect failed', { error: String(e) });
         }
         await new Promise((resolve) => setTimeout(resolve, 500));
         
         try {
           await AndroidWifiP2PTransport.clearPersistentGroups();
         } catch (e) {
-          console.warn(`[P2P Cleanup] clearPersistentGroups failed:`, e);
+          logger.p2p.warn('clearPersistentGroups failed', { error: String(e) });
         }
         await new Promise((resolve) => setTimeout(resolve, 500));
         
         for (let attempt = 1; attempt <= 3; attempt++) {
           try {
             await AndroidWifiP2PTransport.removeGroup();
-            console.log(`[P2P Cleanup] removeGroup succeeded on attempt ${attempt}.`);
+            logger.p2p.debug(`removeGroup succeeded on attempt ${attempt}`);
             break;
           } catch (err: any) {
-            console.warn(`[P2P Cleanup] removeGroup attempt ${attempt} failed:`, err);
+            logger.p2p.warn(`removeGroup attempt ${attempt} failed`, { error: String(err) });
             if (attempt < 3) {
               await new Promise((resolve) => setTimeout(resolve, 600));
             }
@@ -184,9 +187,9 @@ export function useInitializeServices() {
         chatService.registerSecureTransport(secure);
  
         secure.receive(async (plaintext) => {
-          console.log(`[P2P Connection][${connKey}] Encrypted payload successfully decrypted:`, plaintext);
           try {
             const payload = JSON.parse(plaintext);
+            logger.p2p.debug(`[${connKey}] Encrypted payload decrypted, type=${payload?.type || 'unknown'}`);
  
             const remoteId = secure.getRemoteDeviceId();
             if (remoteId) {
@@ -215,13 +218,13 @@ export function useInitializeServices() {
             }
 
             if (relayToId) {
-              console.log(`[P2P Hub Relay] Relaying ${payload.type} packet to remote peer ${relayToId}`);
+              logger.p2p.debug(`Hub relay: forwarding ${payload.type} to peer ${relayToId}`);
               const targetTransport = chatService.getActiveTransport(relayToId);
               if (targetTransport && targetTransport.isHandshakeComplete()) {
                 try {
                   await targetTransport.send(plaintext);
                 } catch (err) {
-                  console.warn(`[P2P Hub Relay] Failed to relay packet to ${relayToId}:`, err);
+                  logger.p2p.warn(`Hub relay failed to forward to ${relayToId}`, { error: String(err) });
                 }
               }
               // Do not process locally
@@ -236,23 +239,23 @@ export function useInitializeServices() {
                   try {
                     await t.send(plaintext);
                   } catch (err) {
-                    console.warn(`[P2P Hub Relay] Failed to relay broadcast to ${pId}:`, err);
+                    logger.p2p.warn(`Hub relay failed to forward broadcast to ${pId}`, { error: String(err) });
                   }
                 }
               });
             }
 
             if (payload.type === 'chat') {
-              console.log('[P2P Connection] Received chat message payload:', payload);
+              logger.p2p.debug('Received chat message payload', { id: payload.id, senderId: payload.senderId });
               await chatService.handleIncomingMessage(payload);
             } else if (payload.type === 'chat_file_start' || payload.type === 'chat_file_chunk' || payload.type === 'chat_file_end') {
               await chatService.handleIncomingFilePayload(payload);
             } else if (payload.type === 'location_share') {
               const peersRepo = new MobileRepository(db);
               await peersRepo.updatePeerLocation(payload.senderId, payload.lat, payload.lng);
-              console.log(`[P2P Connection] Received location share from ${payload.senderId}: ${payload.lat}, ${payload.lng}`);
+              logger.p2p.debug(`Received location share from ${payload.senderId}`, { lat: payload.lat, lng: payload.lng });
             } else if (payload.type === 'sos') {
-              console.log('[P2P Connection] Received SOS event payload:', payload);
+              logger.sos.debug('Received SOS event payload', { id: payload.id, reporterId: payload.reporterId, severity: payload.severity });
               await sosService.handleIncomingSos(payload);
             } else if (payload.type === 'ping') {
               try {
@@ -261,16 +264,16 @@ export function useInitializeServices() {
                 const pongPayload = { type: 'pong', senderId: myId, timestamp: Date.now() };
                 await secure.send(JSON.stringify(pongPayload));
               } catch (err) {
-                console.warn('[P2P Connection] Failed sending pong response:', err);
+                logger.p2p.warn('Failed sending pong response', { error: String(err) });
               }
             } else if (payload.type === 'pong') {
               // Activity already updated above
             } else if (payload.type === 'ack') {
-              console.log(`[P2P Connection] Received delivery ack for message ${payload.messageId}`);
+              logger.p2p.debug(`Received delivery ack for message ${payload.messageId}`);
               await chatService.markMessageDelivered(payload.messageId);
             }
           } catch (err) {
-            console.error('Error handling incoming secure packet payload:', err);
+            logger.p2p.error('Error handling incoming secure packet', { error: String(err) });
           }
         });
  
@@ -279,7 +282,7 @@ export function useInitializeServices() {
           const remoteKey = secure.getRemotePublicKey();
           const remoteName = secure.getRemoteDisplayName();
           if (remoteId) {
-            console.log(`[P2P Connection][${connKey}] Handshake completed successfully. Registering transport for remote peer: ${remoteId}`);
+            logger.p2p.info(`[${connKey}] Handshake completed, registering transport for peer ${remoteId}`);
             entry.deviceId = remoteId;
             chatService.registerActiveTransport(remoteId, secure);
             connectingKeys.delete(connKey);
@@ -314,10 +317,10 @@ export function useInitializeServices() {
                   timestamp: Date.now()
                 };
                 await secure.send(JSON.stringify(payload));
-                console.log('[P2P Connection] Shared initial coordinates with remote peer.');
+                logger.p2p.debug('Shared initial coordinates with remote peer');
               }
             } catch (err) {
-              console.warn('[P2P Connection] Failed sending initial location sharing packet:', err);
+              logger.p2p.warn('Failed sending initial location sharing packet', { error: String(err) });
             }
           }
         });
@@ -325,7 +328,7 @@ export function useInitializeServices() {
         raw.onDisconnect(() => {
           const remoteId = entry.deviceId ?? secure.getRemoteDeviceId();
           if (remoteId) {
-            console.log(`[P2P DEBUG][${connKey}] TCP socket disconnected. Unregistering transport for: ${remoteId}`);
+            logger.p2p.info(`[${connKey}] TCP socket disconnected, unregistering transport for ${remoteId}`);
             chatService.unregisterActiveTransport(remoteId);
           }
           chatService.unregisterSecureTransport(secure);
@@ -347,9 +350,9 @@ export function useInitializeServices() {
             // handshake not completing after an initial disconnect.
             serverSocketBound = false;
             groupRole = 'unassigned';
-            console.log('[P2P DEBUG] All connections gone. Resetting group state and triggering P2P cleanup...');
+            logger.p2p.info('All connections gone, resetting group state and triggering P2P cleanup');
             performP2PCleanup('All Clients Disconnected').catch((err) =>
-              console.warn('[P2P DEBUG] performP2PCleanup after full disconnect failed:', err)
+              logger.p2p.warn('performP2PCleanup after full disconnect failed', { error: String(err) })
             );
           } else if (groupRole === 'client') {
             // Only the client role is exclusive to one group; losing our one
@@ -357,9 +360,9 @@ export function useInitializeServices() {
             groupRole = 'unassigned';
           }
 
-          console.log(`[P2P DEBUG][${connKey}] Disconnected. Triggering re-discovery...`);
+          logger.p2p.debug(`[${connKey}] Disconnected, triggering re-discovery`);
           AndroidWifiP2PTransport.discoverPeers().catch((err) =>
-            console.warn('[P2P DEBUG] Re-discovery after disconnect failed:', err)
+            logger.p2p.warn('Re-discovery after disconnect failed', { error: String(err) })
           );
         });
  
@@ -376,13 +379,13 @@ export function useInitializeServices() {
         const privateKey = await SecureStore.getItemAsync(`private_key_${deviceId}`);
  
         if (!privateKey) {
-          console.warn('Private key not found in SecureStore. Session corrupted, logging out.');
+          logger.auth.warn('Private key not found in SecureStore, session corrupted, logging out');
           await authService.logout();
           dispatch(logout());
           return;
         }
  
-        console.log(`[P2P Bootstrap] Initializing transports for user: ${deviceId}`);
+        logger.p2p.info(`Initializing transports for user ${deviceId.substring(0, 8)}`);
  
         // Reset per-session state
         connectingKeys.clear();
@@ -395,7 +398,7 @@ export function useInitializeServices() {
         // Request Bluetooth permissions before starting advertising/scanning
         const permissionsGranted = await requestBlePermissions();
         if (!permissionsGranted) {
-          console.warn('[P2P Bootstrap] Bluetooth permissions not granted. Cannot start advertising or scanning.');
+          logger.p2p.warn('Bluetooth permissions not granted, cannot start advertising or scanning');
           return;
         }
  
@@ -415,12 +418,12 @@ export function useInitializeServices() {
         try {
           await currentAdvertiser.startAdvertising();
         } catch (err) {
-          console.warn('[P2P Bootstrap] Failed to start BLE advertising (check if Bluetooth is enabled):', err);
+          logger.ble.warn('Failed to start BLE advertising', { error: String(err) });
         }
  
         // â”€â”€ Wire up Wi-Fi Direct Group formation listeners â”€â”€
         unsubConnectionInfo = AndroidWifiP2PTransport.onConnectionInfo(async (info) => {
-          console.log('[P2P DEBUG] Connection Info Event received:', info);
+          logger.p2p.debug('Connection Info Event received', { groupFormed: info.groupFormed, isGroupOwner: info.isGroupOwner, ownerAddr: info.groupOwnerAddress });
           if (info.groupFormed) {
             let ownerAddress = info.groupOwnerAddress;
             const isOwner = info.isGroupOwner;
@@ -436,10 +439,10 @@ export function useInitializeServices() {
                 // loop and tag events with a connection id â€” that change has
                 // to happen in the (currently missing from this repo) Kotlin
                 // WifiDirect module.
-                console.log('[P2P DEBUG] Server socket already bound. Skipping duplicate openServerSocket.');
+                logger.p2p.debug('Server socket already bound, skipping duplicate openServerSocket');
                 return;
               }
-              console.log('[P2P DEBUG] I am Group Owner. Opening TCP server socket on port 8888...');
+              logger.p2p.info('I am Group Owner, opening TCP server socket on port 8888');
               try {
                 const raw = new AndroidWifiP2PTransport(deviceId);
                 const secure = new SecureTransport(raw, privateKey, publicKey, deviceId, displayName);
@@ -452,50 +455,50 @@ export function useInitializeServices() {
                 void ownerEntry;
  
                 raw.onConnect(async () => {
-                  console.log(`[P2P DEBUG][${connKey}] TCP Server received client connection. Initiating handshake...`);
+                  logger.p2p.debug(`[${connKey}] TCP Server received client connection, initiating handshake`);
                   try {
                     await secure.establishHandshake();
                   } catch (err) {
-                    console.error('[P2P DEBUG] Failed establishing handshake on client connect:', err);
+                    logger.p2p.error('Failed establishing handshake on client connect', { error: String(err) });
                   }
                 });
  
                 await raw.openServerSocket(8888);
                 serverSocketBound = true;
-                console.log('[P2P DEBUG] TCP ServerSocket bound and listening on port 8888.');
+                logger.p2p.info('TCP ServerSocket bound and listening on port 8888');
               } catch (err) {
-                console.error('[P2P DEBUG] openServerSocket failed:', err);
+                logger.p2p.error('openServerSocket failed', { error: String(err) });
               }
             } else {
               groupRole = 'client';
               const connKey = ownerAddress || 'pending-owner';
  
               if (connectionsByKey.has(connKey) || connectingKeys.has(connKey)) {
-                console.log(`[P2P DEBUG] Already connected/connecting to owner ${connKey}. Ignoring duplicate event.`);
+                logger.p2p.debug(`Already connected/connecting to owner ${connKey}, ignoring duplicate event`);
                 return;
               }
  
               // Resolve empty owner address by fetching updated connection info with backoff
               if (!ownerAddress || ownerAddress === '') {
-                console.log('[P2P DEBUG] Group Owner Address is empty. Retrying updated connection info fetch...');
+                logger.p2p.debug('Group Owner Address is empty, retrying connection info fetch');
                 for (let attempt = 1; attempt <= 5; attempt++) {
                   await new Promise((resolve) => setTimeout(resolve, 1000 * attempt));
                   try {
                     const updatedInfo = await AndroidWifiP2PTransport.getConnectionInfo();
-                    console.log(`[P2P DEBUG] Attempt ${attempt} Connection Info Fetch Result:`, updatedInfo);
+                    logger.p2p.debug(`Attempt ${attempt} connection info fetch`, { result: updatedInfo });
                     if (updatedInfo.groupOwnerAddress && updatedInfo.groupOwnerAddress !== '') {
                       ownerAddress = updatedInfo.groupOwnerAddress;
                       break;
                     }
                   } catch (err) {
-                    console.warn(`[P2P DEBUG] Attempt ${attempt} to fetch connection info failed:`, err);
+                    logger.p2p.warn(`Attempt ${attempt} to fetch connection info failed`, { error: String(err) });
                   }
                 }
               }
  
-              console.log('[P2P DEBUG] I am Client. Target Group Owner IP:', ownerAddress);
+              logger.p2p.info('I am Client, targeting Group Owner', { ownerAddress });
               if (!ownerAddress || ownerAddress === '') {
-                console.error('[P2P DEBUG] Cannot connect: Group Owner Address remains empty after retries. Resetting P2P group...');
+                logger.p2p.error('Group Owner Address remains empty after retries, resetting P2P group');
                 groupRole = 'unassigned';
                 await performP2PCleanup('Client Empty GO IP');
                 return;
@@ -518,17 +521,17 @@ export function useInitializeServices() {
               for (let attempt = 1; attempt <= 5 && !connected; attempt++) {
                 try {
                   await new Promise((resolve) => setTimeout(resolve, delay));
-                  console.log(`[P2P DEBUG] TCP connection attempt ${attempt}/5 to ${ownerAddress}:8888...`);
+                  logger.p2p.debug(`TCP connection attempt ${attempt}/5 to ${ownerAddress}:8888`);
                   await raw.connectToSocket(ownerAddress, 8888);
                   connected = true;
-                  console.log('[P2P DEBUG] TCP socket connected successfully!');
-                  console.log('[P2P DEBUG] Client establishing secure transport handshake...');
+                  logger.p2p.info('TCP socket connected successfully');
+                  logger.p2p.info('Client establishing secure transport handshake');
                   await secure.establishHandshake();
                 } catch (err: any) {
                   delay = Math.min(delay * 2, 32000);
-                  console.warn(`[P2P DEBUG] Attempt ${attempt}/5 failed: ${err.message || err}. Next retry in ${delay / 1000}s.`);
+                  logger.p2p.warn(`Attempt ${attempt}/5 failed`, { error: String(err.message || err), nextRetryIn: `${delay / 1000}s` });
                   if (attempt === 5) {
-                    console.error('[P2P DEBUG] Max connection retries reached. Group Owner unreachable. Resetting P2P group...');
+                    logger.p2p.error('Max connection retries reached, Group Owner unreachable, resetting P2P group');
                     groupRole = 'unassigned';
                     connectingKeys.delete(finalKey);
                     connectionsByKey.delete(finalKey);
@@ -538,7 +541,7 @@ export function useInitializeServices() {
               }
             }
           } else {
-            console.log('[P2P DEBUG] Group is not formed (info.groupFormed is false). Resetting connection flags.');
+            logger.p2p.debug('Group not formed (groupFormed=false), resetting connection flags');
             serverSocketBound = false;
             groupRole = 'unassigned';
             connectingKeys.clear();
@@ -546,14 +549,14 @@ export function useInitializeServices() {
         });
  
         unsubPeersChanged = AndroidWifiP2PTransport.onPeersChanged(async (peers) => {
-          console.log('[P2P DEBUG] Wi-Fi Direct peers changed. Peers count:', peers.length, 'Peers:', peers);
+          logger.p2p.debug('Wi-Fi Direct peers changed', { count: peers.length });
  
           // A device already committed as a CLIENT of another group cannot
           // also connect out to a second peer â€” that's a real Wi-Fi Direct
           // constraint. But being the GROUP OWNER (or unassigned) should NOT
           // stop us from inviting additional available peers in.
           if (groupRole === 'client') {
-            console.log('[P2P DEBUG] Already a client of another group. Ignoring peers list.');
+            logger.p2p.debug('Already a client of another group, ignoring peers list');
             return;
           }
  
@@ -584,7 +587,7 @@ export function useInitializeServices() {
           );
 
           if (candidates.length === 0) {
-            console.log('[P2P DEBUG] No new AVAILABLE peers to connect to.');
+            logger.p2p.debug('No new AVAILABLE peers to connect to');
             return;
           }
 
@@ -620,14 +623,14 @@ export function useInitializeServices() {
               // Unambiguous: exactly one BLE peer with this first name
               const bleRemoteId = bleMatches[0];
               const isInitiator = deviceId < bleRemoteId;
-              console.log(`[P2P DEBUG] Candidate '${wifiName}' resolved via BLE map => ${bleRemoteId.substring(0, 8)}. isInitiator=${isInitiator}`);
+              logger.p2p.debug(`Candidate '${wifiName}' resolved via BLE map`, { bleRemoteId: bleRemoteId.substring(0, 8), isInitiator });
               if (isInitiator) {
                 candidateToConnect = c;
                 break;
               }
               continue;
             } else if (bleMatches.length > 1) {
-              console.log(`[P2P DEBUG] Candidate '${wifiName}' has ${bleMatches.length} BLE matches (name collision). Falling to name fallback.`);
+              logger.p2p.debug(`Candidate '${wifiName}' has ${bleMatches.length} BLE matches (name collision), falling to name fallback`);
             }
 
             // 2. Name-based fallback — symmetric & collision-safe.
@@ -642,7 +645,7 @@ export function useInitializeServices() {
               const localMac = AndroidWifiP2PTransport.localMacAddress?.toLowerCase() || deviceId.toLowerCase();
               isInitiatorFallback = localMac < c.deviceAddress.toLowerCase();
             }
-            console.log(`[P2P DEBUG] Candidate '${wifiName}' name fallback: local='${localFirstWord}' remote='${firstWordKey}' isInitiator=${isInitiatorFallback}`);
+            logger.p2p.debug(`Candidate '${wifiName}' name fallback`, { local: localFirstWord, remote: firstWordKey, isInitiator: isInitiatorFallback });
             if (isInitiatorFallback) {
               candidateToConnect = c;
               break;
@@ -650,19 +653,19 @@ export function useInitializeServices() {
           }
 
           if (!candidateToConnect) {
-            console.log('[P2P DEBUG] We are not the initiator for any available candidate peer. Waiting for them to connect...');
+            logger.p2p.debug('Not the initiator for any available candidate peer, waiting for them to connect');
             return;
           }
 
           connectingKeys.add(candidateToConnect.deviceAddress);
           // Remember the MAC so setupPeerConnection can populate entry.deviceAddress
           lastTargetMacAddress = candidateToConnect.deviceAddress;
-          console.log('[P2P DEBUG] Selected target peer for Wi-Fi Direct connection:', candidateToConnect.deviceName, candidateToConnect.deviceAddress);
+          logger.p2p.info('Selected target peer for Wi-Fi Direct connection', { name: candidateToConnect.deviceName, address: candidateToConnect.deviceAddress });
           try {
             await AndroidWifiP2PTransport.connectToPeer(candidateToConnect.deviceAddress);
-            console.log('[P2P DEBUG] Native connectToPeer call resolved successfully. Waiting for Group Formation connection info event...');
+            logger.p2p.debug('Native connectToPeer resolved, waiting for Group Formation');
           } catch (err: any) {
-            console.error('[P2P DEBUG] connectToPeer failed:', err);
+            logger.p2p.error('connectToPeer failed', { error: String(err) });
             connectingKeys.delete(candidateToConnect.deviceAddress);
             
             // Only perform cleanup if we are still unassigned and no active/connecting key exists
@@ -687,7 +690,7 @@ export function useInitializeServices() {
               const peersRepo = new MobileRepository(db);
               const exists = await peersRepo.getPeer(peerDevice.deviceId);
               if (!exists) {
-                console.log(`[P2P DEBUG] First time seeing peer ${peerDevice.deviceId.substring(0, 8)} via BLE. Adding to local DB...`);
+                logger.p2p.debug(`First time seeing peer ${peerDevice.deviceId.substring(0, 8)} via BLE, adding to local DB`);
                 await peersRepo.addNewPeer({
                   deviceId: peerDevice.deviceId,
                   publicKey: peerDevice.publicKeyHash,
@@ -705,7 +708,7 @@ export function useInitializeServices() {
                 });
               }
             } catch (err) {
-              console.warn('[P2P DEBUG] Failed to query/add new BLE peer to DB:', err);
+              logger.p2p.warn('Failed to query/add new BLE peer to DB', { error: String(err) });
               scannedPeersCache.delete(peerDevice.deviceId);
             }
           }
@@ -722,7 +725,7 @@ export function useInitializeServices() {
             const idPrefix = peerDevice.deviceId.substring(0, 8).toLowerCase();
             const compoundKey = `${firstWord}:${idPrefix}`;
             bleDiscoveredIds.set(compoundKey, peerDevice.deviceId);
-            console.log(`[P2P DEBUG] BLE map updated: '${compoundKey}' => ${peerDevice.deviceId.substring(0, 8)}`);
+            logger.p2p.debug(`BLE map updated: '${compoundKey}' => ${peerDevice.deviceId.substring(0, 8)}`);
           }
 
           // Same fix as onPeersChanged: only skip discovery for a peer we're
@@ -732,16 +735,16 @@ export function useInitializeServices() {
             Array.from(connectionsByKey.values()).some((c) => c.deviceId === peerDevice.deviceId);
  
           if (groupRole !== 'client' && !alreadyConnected) {
-            console.log(`[P2P DEBUG] BLE Scanned Peer: ${peerDevice.deviceId.substring(0, 8)}. My ID: ${deviceId.substring(0, 8)}.`);
+            logger.p2p.debug(`BLE scanned peer ${peerDevice.deviceId.substring(0, 8)}, my ID ${deviceId.substring(0, 8)}`);
  
             const now = Date.now();
             if (now - lastDiscoverTime > 5000) {
               lastDiscoverTime = now;
-              console.log('[P2P DEBUG] Triggering native Wi-Fi Direct peer discovery (throttled)...');
+              logger.p2p.debug('Triggering native Wi-Fi Direct peer discovery (throttled)');
               try {
                 await AndroidWifiP2PTransport.discoverPeers();
               } catch (err) {
-                console.warn('[P2P DEBUG] discoverPeers failed:', err);
+                logger.p2p.warn('discoverPeers failed', { error: String(err) });
               }
             }
           }
@@ -758,18 +761,18 @@ export function useInitializeServices() {
             (id) => !Array.from(connectionsByKey.values()).some((conn) => conn.deviceId === id)
           );
           if (!hasUnconnectedBlePeer) return;
-          console.log('[P2P DEBUG] Retry timer: still unassigned with known BLE peers. Re-triggering discoverPeers...');
+          logger.p2p.debug('Retry timer: still unassigned with known BLE peers, re-triggering discoverPeers');
           try {
             await AndroidWifiP2PTransport.discoverPeers();
           } catch (err) {
-            console.warn('[P2P DEBUG] Retry discoverPeers failed:', err);
+            logger.p2p.warn('Retry discoverPeers failed', { error: String(err) });
           }
         }, 30000);
  
         try {
           currentScanner.startScanning();
         } catch (err) {
-          console.warn('[P2P Bootstrap] Failed to start BLE scanning (check if Bluetooth is enabled):', err);
+          logger.ble.warn('Failed to start BLE scanning', { error: String(err) });
         }
       };
  
@@ -777,7 +780,7 @@ export function useInitializeServices() {
        * Shuts down all active BLE advertisements, scanners, and socket streams.
        */
       const shutdownTransports = async () => {
-        console.log('[P2P Bootstrap] Shutting down transport protocols.');
+        logger.p2p.info('Shutting down transport protocols');
         if (discoveryRetryTimer) {
           clearInterval(discoveryRetryTimer);
           discoveryRetryTimer = null;
@@ -832,7 +835,7 @@ export function useInitializeServices() {
     let servicesRef: typeof services | null = null;
  
     initAsync().catch((error) => {
-      console.error('Failed to bootstrap services:', error);
+      logger.sys.error('Failed to bootstrap services', { error: String(error) });
     });
  
     // Capture refs for AppState handler after services are initialized
@@ -849,7 +852,7 @@ export function useInitializeServices() {
  
     // ENHANCEMENT 7: AppState handler disabled for background P2P reliability
     const handleAppStateChange = async (nextState: AppStateStatus) => {
-      console.log('[P2P Bootstrap] AppState transition to:', nextState, '(Transports kept active)');
+      logger.sys.debug(`AppState transition to ${nextState} (transports kept active)`);
     };
  
     const appStateSub = AppState.addEventListener('change', handleAppStateChange);
@@ -860,7 +863,7 @@ export function useInitializeServices() {
       // Tear down all BLE and Wi-Fi Direct resources on unmount
       if (cleanupTransports) {
         cleanupTransports().catch((err) =>
-          console.warn('[P2P Bootstrap] Cleanup on unmount failed:', err)
+          logger.p2p.warn('Cleanup on unmount failed', { error: String(err) })
         );
       }
     };

@@ -1,5 +1,6 @@
 import { NativeModules } from 'react-native';
 import { DISASTER_P2P_SERVICE_UUID, UserRole } from './ble-types';
+import { logger } from '../../utils/logger';
 
 const { BleAdvertiser: NativeBleAdvertiser } = NativeModules;
 
@@ -95,21 +96,17 @@ export class BleAdvertiser {
     if (!NativeBleAdvertiser) {
       // Non-native environment (e.g. Jest/Node.js test runner)
       this.isAdvertising = true;
-      console.log(
-        `[BLE Advertiser] Advertising started (simulated). Role: ${this.role}, ID: ${this.deviceId}`
-      );
+      logger.ble.info('Advertising started (simulated)', { role: this.role, deviceId: this.deviceId });
       return;
     }
 
     try {
       await NativeBleAdvertiser.startAdvertising(payloadBase64, localName);
       this.isAdvertising = true;
-      console.log(
-        `[BLE Advertiser] Advertising started. Role: ${this.role}, ID: ${this.deviceId}`
-      );
+      logger.ble.info('Advertising started', { role: this.role, deviceId: this.deviceId });
     } catch (error) {
       this.isAdvertising = false;
-      console.error('[BLE Advertiser] Failed to start advertising:', error);
+      logger.ble.error('Failed to start advertising', { error: String(error) });
       throw error;
     }
   }
@@ -124,10 +121,10 @@ export class BleAdvertiser {
         await NativeBleAdvertiser.stopAdvertising();
       }
     } catch (error) {
-      console.warn('[BLE Advertiser] Error stopping advertising:', error);
+      logger.ble.warn('Error stopping advertising', { error: String(error) });
     } finally {
       this.isAdvertising = false;
-      console.log('[BLE Advertiser] Advertising stopped.');
+      logger.ble.info('Advertising stopped');
     }
   }
 

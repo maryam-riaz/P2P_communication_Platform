@@ -1,5 +1,6 @@
 import { NativeModules, NativeEventEmitter } from 'react-native';
 import { PeerTransport } from '../transport';
+import { logger } from '../../utils/logger';
 
 const { WifiDirect } = NativeModules;
 
@@ -76,7 +77,7 @@ export class AndroidWifiP2PTransport implements PeerTransport {
    */
   static async initialize(): Promise<void> {
     if (!WifiDirect) {
-      console.warn('[Android Wi-Fi Direct] Native module not available (not a native build).');
+      logger.tcp.warn('Native module not available (not a native build)');
       return;
     }
     await WifiDirect.initialize();
@@ -87,12 +88,12 @@ export class AndroidWifiP2PTransport implements PeerTransport {
         (event: { deviceAddress: string }) => {
           if (event?.deviceAddress) {
             AndroidWifiP2PTransport.localMacAddress = event.deviceAddress;
-            console.log('[Android Wi-Fi Direct] Local MAC address captured:', event.deviceAddress);
+            logger.tcp.debug('Local MAC address captured', { mac: event.deviceAddress });
           }
         }
       );
     }
-    console.log('[Android Wi-Fi Direct] Native WifiP2pManager initialized.');
+    logger.tcp.info('Native WifiP2pManager initialized');
   }
 
   /**
@@ -101,7 +102,7 @@ export class AndroidWifiP2PTransport implements PeerTransport {
   static async cleanup(): Promise<void> {
     if (!WifiDirect) return;
     await WifiDirect.cleanup();
-    console.log('[Android Wi-Fi Direct] Native resources cleaned up.');
+    logger.tcp.info('Native resources cleaned up');
   }
 
   // ─── Static: Peer Discovery ────────────────────────────────────────────────
@@ -112,11 +113,11 @@ export class AndroidWifiP2PTransport implements PeerTransport {
    */
   static async discoverPeers(): Promise<void> {
     if (!WifiDirect) {
-      console.warn('[Android Wi-Fi Direct] discoverPeers: native module not available.');
+      logger.tcp.warn('discoverPeers: native module not available');
       return;
     }
     await WifiDirect.discoverPeers();
-    console.log('[Android Wi-Fi Direct] Peer discovery started via WifiP2pManager.');
+    logger.tcp.info('Peer discovery started via WifiP2pManager');
   }
 
   /**
@@ -159,11 +160,11 @@ export class AndroidWifiP2PTransport implements PeerTransport {
    */
   static async connectToPeer(deviceAddress: string): Promise<void> {
     if (!WifiDirect) {
-      console.warn('[Android Wi-Fi Direct] connectToPeer: native module not available.');
+      logger.tcp.warn('connectToPeer: native module not available');
       return;
     }
     await WifiDirect.connectToPeer(deviceAddress);
-    console.log(`[Android Wi-Fi Direct] Connection requested to peer: ${deviceAddress}`);
+    logger.tcp.info('Connection requested to peer', { deviceAddress });
   }
 
   /**
@@ -251,7 +252,7 @@ export class AndroidWifiP2PTransport implements PeerTransport {
     this.connectedSubscription = this.wifiDirectEmitter.addListener(
       'WifiDirectTcpConnected',
       () => {
-        console.log('[Android Wi-Fi Direct] TCP client connected to server socket.');
+        logger.tcp.debug('TCP client connected to server socket');
         this.isConnectedFlag = true;
         if (this.connectCallback) {
           this.connectCallback();
@@ -263,7 +264,7 @@ export class AndroidWifiP2PTransport implements PeerTransport {
     this.disconnectedSubscription = this.wifiDirectEmitter.addListener(
       'WifiDirectTcpDisconnected',
       () => {
-        console.log('[Android Wi-Fi Direct] TCP socket disconnected.');
+        logger.tcp.info('TCP socket disconnected');
         this.isConnectedFlag = false;
         this.removeNativeListeners();
         if (this.disconnectCallback) {
@@ -290,14 +291,14 @@ export class AndroidWifiP2PTransport implements PeerTransport {
    */
   async openServerSocket(port: number = 8888): Promise<void> {
     if (!WifiDirect) {
-      console.warn('[Android Wi-Fi Direct] openServerSocket: native module not available.');
+      logger.tcp.warn('openServerSocket: native module not available');
       return;
     }
     this._isServer = true;
-    console.log(`[Android Wi-Fi Direct] Opening ServerSocket on port ${port}...`);
+    logger.tcp.info('Opening ServerSocket', { port });
     this.setupNativeListeners();
     await WifiDirect.openServerSocket(port);
-    console.log(`[Android Wi-Fi Direct] ServerSocket listening on port ${port}.`);
+    logger.tcp.info('ServerSocket listening', { port });
   }
 
   /**
@@ -306,18 +307,18 @@ export class AndroidWifiP2PTransport implements PeerTransport {
    */
   async connectToSocket(ipAddress: string, port: number = 8888): Promise<void> {
     if (!WifiDirect) {
-      console.warn('[Android Wi-Fi Direct] connectToSocket: native module not available.');
+      logger.tcp.warn('connectToSocket: native module not available');
       return;
     }
     this._isServer = false;
-    console.log(`[Android Wi-Fi Direct] Connecting TCP socket to ${ipAddress}:${port}`);
+    logger.tcp.info('Connecting TCP socket', { ipAddress, port });
     this.setupNativeListeners();
     await WifiDirect.connectToSocket(ipAddress, port);
     this.isConnectedFlag = true;
     // Yield one microtask so the server-side WifiDirectTcpConnected event can
     // fire and set isConnected() on the server transport before the test asserts.
     await Promise.resolve();
-    console.log('[Android Wi-Fi Direct] TCP connection established to group owner.');
+    logger.tcp.info('TCP connection established to group owner');
   }
 
   // ─── PeerTransport Interface ───────────────────────────────────────────────
@@ -386,7 +387,7 @@ export class AndroidWifiP2PTransport implements PeerTransport {
     if (this.disconnectCallback) {
       this.disconnectCallback();
     }
-    console.log('[Android Wi-Fi Direct] TCP transport disconnected.');
+    logger.tcp.info('TCP transport disconnected');
   }
 
   setRemotePeerId(peerId: string): void {

@@ -5,6 +5,7 @@ import { generateKeyPair } from 'shared';
 import { MobileRepository } from '../db/repository';
 import { LocalUser } from '../db/models';
 import { Observable } from 'rxjs';
+import { logger } from '../utils/logger';
 
 export class AuthService {
   private repository: MobileRepository;
