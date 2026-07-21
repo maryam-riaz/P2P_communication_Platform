@@ -5,3 +5,6 @@ export { default as MediaChunk } from './MediaChunk';
 export { default as SyncOutbox } from './SyncOutbox';
 export { default as PendingMessage } from './PendingMessage';
 export { default as PeerKey } from './PeerKey';
+export { default as Conversation } from './Conversation';
+export { default as ConversationParticipant } from './ConversationParticipant';
+export { default as MediaTransfer } from './MediaTransfer';

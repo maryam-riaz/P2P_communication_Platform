@@ -106,6 +106,8 @@ export interface MeshEnvelope {
   sender_id: string;
   sender_role_cert: string;
   sender_public_key: string;
+  conversation_id: string;
+  display_name: string;
   ttl: number;
   timestamp: number;
   chunk_index: number;

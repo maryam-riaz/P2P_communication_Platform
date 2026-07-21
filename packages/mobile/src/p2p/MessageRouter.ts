@@ -12,16 +12,32 @@ import { keyManager, keyExchange, encryptForPeer, decryptFromPeer } from '../cry
 import { database } from '../db';
 import { Message, PendingMessage, PeerKey } from '../db/models';
 import { logm, errm } from '../utils/logger';
+import { receiveChunk } from './ChunkAssembler';
+import { ConversationManager } from './ConversationManager';
 
 const TAG = 'ROUTER';
+
+export interface PeerSession {
+  fingerprint: string;
+  endpointId: string;
+  displayName: string;
+  connectedAt: number;
+}
 
 export class MessageRouter {
   private transport: ITransport;
   private dedup: DedupCache;
   private deviceId: string;
+  private displayName = '';
   private keyManagerInitialized = false;
   private unsubscribers: (() => void)[] = [];
-  private decryptedCallbacks = new Set<(senderId: string, plaintext: string) => void>();
+  private decryptedCallbacks = new Set<(senderId: string, plaintext: string, conversationId?: string) => void>();
+  private conversationManager: ConversationManager;
+  peerNames = new Map<string, string>();
+  private peerSessions = new Map<string, PeerSession>();
+  private endpointToFingerprint = new Map<string, string>();
+  private staleEndpointToFingerprint = new Map<string, string>();
+  private sessionSubscribers = new Set<(session: PeerSession) => void>();
 
   getDeviceId(): string {
     return this.deviceId;
@@ -35,11 +51,73 @@ export class MessageRouter {
     this.transport = transport;
     this.dedup = new DedupCache();
     this.deviceId = deviceId || 'unknown-device';
+    this.conversationManager = new ConversationManager(this.deviceId);
     this.wireEvents();
+  }
+
+  setDisplayName(name: string): void {
+    this.displayName = name;
+  }
+
+  getDisplayName(): string {
+    return this.displayName;
   }
 
   setDeviceId(id: string): void {
     this.deviceId = id;
+    this.conversationManager.setSelfId(id);
+  }
+
+  getPeerName(peerId: string): string {
+    return this.peerNames.get(peerId)
+      || this.peerSessions.get(peerId)?.displayName
+      || '';
+  }
+
+  subscribePeerSession(cb: (session: PeerSession) => void): () => void {
+    this.peerSessions.forEach((session) => cb(session));
+    this.sessionSubscribers.add(cb);
+    return () => this.sessionSubscribers.delete(cb);
+  }
+
+  getPeerSession(fingerprint: string): PeerSession | undefined {
+    return this.peerSessions.get(fingerprint);
+  }
+
+  getPeerSessionByEndpoint(endpointId: string): PeerSession | undefined {
+    const fingerprint = this.endpointToFingerprint.get(endpointId);
+    if (fingerprint) return this.peerSessions.get(fingerprint);
+    return undefined;
+  }
+
+  resolveEndpointId(endpointIdOrFingerprint: string): string {
+    if (this.endpointToFingerprint.has(endpointIdOrFingerprint)) {
+      return endpointIdOrFingerprint;
+    }
+    const session = this.peerSessions.get(endpointIdOrFingerprint);
+    if (session?.endpointId) {
+      return session.endpointId;
+    }
+    const staleFingerprint = this.staleEndpointToFingerprint.get(endpointIdOrFingerprint);
+    if (staleFingerprint) {
+      const currentSession = this.peerSessions.get(staleFingerprint);
+      if (currentSession?.endpointId) {
+        return currentSession.endpointId;
+      }
+    }
+    return endpointIdOrFingerprint;
+  }
+
+  async ensureConversation(conversationId: string, peerId: string, peerName: string): Promise<void> {
+    await this.conversationManager.getOrCreateConversation(conversationId, peerId, peerName);
+  }
+
+  async lookupConversationByPeer(peerId: string): Promise<string | null> {
+    return this.conversationManager.lookupConversationByPeer(peerId);
+  }
+
+  async updateConversationPreview(conversationId: string, preview: string, messageType: string): Promise<void> {
+    await this.conversationManager.updateLastMessage(conversationId, preview, messageType);
   }
 
   async ensureCrypto(): Promise<void> {
@@ -47,6 +125,7 @@ export class MessageRouter {
       await keyManager.initialize();
       this.keyManagerInitialized = true;
       this.deviceId = keyManager.getFingerprint();
+      this.conversationManager.setSelfId(this.deviceId);
       logm(TAG, `KeyManager initialized. DeviceId=${this.deviceId.substring(0, 16)}...`);
     }
   }
@@ -59,6 +138,7 @@ export class MessageRouter {
       ttl?: number;
       chunkIndex?: number;
       chunkTotal?: number;
+      conversationId?: string;
     },
   ): Promise<MeshEnvelope[]> {
     await this.ensureCrypto();
@@ -74,10 +154,17 @@ export class MessageRouter {
         btoa(plaintext),
         '',
         '',
-        { ttl: opts?.ttl, chunkIndex: opts?.chunkIndex, chunkTotal: opts?.chunkTotal },
+        {
+          ttl: opts?.ttl,
+          chunkIndex: opts?.chunkIndex,
+          chunkTotal: opts?.chunkTotal,
+          conversationId: opts?.conversationId,
+          displayName: this.displayName,
+        },
       );
+      this.dedup.add(env.message_id);
       envelopes.push(env);
-      await this.persistMessage(env, 'pending');
+      await this.persistMessage(env, 'pending', plaintext);
       await this.persistPending(env);
       logm(TAG, `sendMessage: no peers, queued ${env.message_id} (${type})`);
       return envelopes;
@@ -95,8 +182,15 @@ export class MessageRouter {
           encrypted.ciphertext,
           encrypted.nonce,
           '',
-          { ttl: opts?.ttl, chunkIndex: opts?.chunkIndex, chunkTotal: opts?.chunkTotal },
+          {
+            ttl: opts?.ttl,
+            chunkIndex: opts?.chunkIndex,
+            chunkTotal: opts?.chunkTotal,
+            conversationId: opts?.conversationId,
+            displayName: this.displayName,
+          },
         );
+        this.dedup.add(env.message_id);
         envelopes.push(env);
         const serialized = serializeEnvelope(env);
         try {
@@ -116,8 +210,15 @@ export class MessageRouter {
           btoa(plaintext),
           '',
           '',
-          { ttl: opts?.ttl, chunkIndex: opts?.chunkIndex, chunkTotal: opts?.chunkTotal },
+          {
+            ttl: opts?.ttl,
+            chunkIndex: opts?.chunkIndex,
+            chunkTotal: opts?.chunkTotal,
+            conversationId: opts?.conversationId,
+            displayName: this.displayName,
+          },
         );
+        this.dedup.add(env.message_id);
         envelopes.push(env);
         const serialized = serializeEnvelope(env);
         try {
@@ -129,22 +230,36 @@ export class MessageRouter {
     }
 
     for (const env of envelopes) {
-      await this.persistMessage(env, 'pending');
+      const recordId = await this.persistMessage(env, 'pending', plaintext);
+      if (recordId) {
+        await this.updateMessageStatus(recordId, 'sent');
+      }
     }
 
     return envelopes;
   }
 
+  async markConversationRead(conversationId: string, peerId: string): Promise<void> {
+    await this.conversationManager.markRead(conversationId, peerId);
+  }
+
   async sendToPeer(
-    endpointId: string,
+    endpointIdOrFingerprint: string,
     type: EnvelopeType,
     plaintext: string,
     opts?: {
       senderRoleCert?: string;
       ttl?: number;
+      chunkIndex?: number;
+      chunkTotal?: number;
+      conversationId?: string;
+      messageId?: string;
     },
   ): Promise<MeshEnvelope> {
     await this.ensureCrypto();
+
+    const endpointId = this.resolveEndpointId(endpointIdOrFingerprint);
+
     const theirPub = keyExchange.getPublicKey(endpointId);
 
     let ciphertext: string;
@@ -167,18 +282,42 @@ export class MessageRouter {
       ciphertext,
       nonce,
       '',
-      { ttl: opts?.ttl },
+      {
+        messageId: opts?.messageId,
+        ttl: opts?.ttl,
+        chunkIndex: opts?.chunkIndex,
+        chunkTotal: opts?.chunkTotal,
+        conversationId: opts?.conversationId,
+        displayName: this.displayName,
+      },
     );
 
+    // Use composite dedup key for IMAGE chunks (message_id + chunk_index) so relayed copies are rejected
+    const dedupKey = type === 'IMAGE'
+      ? `${env.message_id}_${opts?.chunkIndex ?? 0}`
+      : env.message_id;
+    this.dedup.add(dedupKey);
     const serialized = serializeEnvelope(env);
-    await this.persistMessage(env, 'pending');
+
+    // For IMAGE chunks, skip persistMessage (ImageSender handles sender-side record)
+    let pendingRecordId: string | null = null;
+    if (type !== 'IMAGE') {
+      pendingRecordId = await this.persistMessage(env, 'pending', plaintext);
+    }
 
     try {
       await this.transport.sendPayload(endpointId, serialized);
       logm(TAG, `sendToPeer: sent ${env.message_id} to ${endpointId}`);
     } catch {
       logm(TAG, `sendToPeer: failed to ${endpointId}, queued ${env.message_id}`);
-      await this.persistPending(env, endpointId);
+      if (type !== 'IMAGE') {
+        await this.persistPending(env, endpointId);
+      }
+      return env;
+    }
+
+    if (pendingRecordId) {
+      await this.updateMessageStatus(pendingRecordId, 'sent');
     }
 
     return env;
@@ -192,7 +331,7 @@ export class MessageRouter {
     logm(TAG, 'MessageRouter destroyed');
   }
 
-  subscribeDecrypted(cb: (senderId: string, plaintext: string) => void): () => void {
+  subscribeDecrypted(cb: (senderId: string, plaintext: string, conversationId?: string) => void): () => void {
     this.decryptedCallbacks.add(cb);
     return () => this.decryptedCallbacks.delete(cb);
   }
@@ -214,6 +353,12 @@ export class MessageRouter {
       }),
     );
 
+    this.unsubscribers.push(
+      this.transport.onPeerDisconnected((event) => {
+        this.handlePeerDisconnected(event);
+      }),
+    );
+
     logm(TAG, 'Event wiring complete');
   }
 
@@ -225,11 +370,15 @@ export class MessageRouter {
       return;
     }
 
-    if (this.dedup.has(env.message_id)) {
-      logm(TAG, `Dedup hit: ${env.message_id}`);
+    // Use composite key for IMAGE chunks (messageId + chunkIndex) so each chunk is dedup'd individually
+    const dedupKey = env.type === 'IMAGE'
+      ? `${env.message_id}_${env.chunk_index}`
+      : env.message_id;
+    if (this.dedup.has(dedupKey)) {
+      logm(TAG, `Dedup hit: ${dedupKey}`);
       return;
     }
-    this.dedup.add(env.message_id);
+    this.dedup.add(dedupKey);
 
     if (env.route_history.includes(this.deviceId)) {
       logm(TAG, `Loop: ${this.deviceId} in route_history for ${env.message_id}`);
@@ -239,8 +388,25 @@ export class MessageRouter {
     if (env.type === 'ROLE_CREDENTIAL') {
       const fingerprint = keyExchange.registerPeerKey(env.sender_id, env.ciphertext);
       keyExchange.registerPeerKey(event.peerId, env.ciphertext);
+      if (env.display_name) {
+        this.peerNames.set(env.sender_id, env.display_name);
+        this.peerNames.set(event.peerId, env.display_name);
+      }
       logm(TAG, `Key exchange: registered key for ${env.sender_id} (ep=${event.peerId}): ${fingerprint.substring(0, 16)}...`);
       await this.persistPeerKey(env.sender_id, env.ciphertext, fingerprint);
+
+      // Create/update PeerSession — handshake is now complete
+      const session: PeerSession = {
+        fingerprint: env.sender_id,
+        endpointId: event.peerId,
+        displayName: env.display_name || this.peerNames.get(env.sender_id) || '',
+        connectedAt: Date.now(),
+      };
+      this.peerSessions.set(env.sender_id, session);
+      this.endpointToFingerprint.set(event.peerId, env.sender_id);
+      this.staleEndpointToFingerprint.delete(event.peerId);
+      this.sessionSubscribers.forEach((cb) => cb(session));
+
       return;
     }
 
@@ -264,11 +430,54 @@ export class MessageRouter {
     if (plaintext !== null) {
       keyExchange.registerPeerKey(env.sender_id, env.sender_public_key);
       keyExchange.registerPeerKey(event.peerId, env.sender_public_key);
-      await this.persistMessage(env, 'received', plaintext);
-      logm(TAG, `Decrypted message from ${env.sender_id} (ep=${event.peerId}): ${plaintext.substring(0, 50)}`);
-      this.decryptedCallbacks.forEach((cb) => cb(env.sender_id, plaintext));
+
+      // Ensure endpoint→fingerprint mapping exists (handles reconnection edge cases)
+      if (!this.endpointToFingerprint.has(event.peerId)) {
+        this.endpointToFingerprint.set(event.peerId, env.sender_id);
+      }
+
+      if (env.display_name) {
+        this.peerNames.set(env.sender_id, env.display_name);
+      }
+
+      // Use existing local conversation for this peer to avoid duplicates
+      const existingConvId = await this.conversationManager.lookupConversationByPeer(env.sender_id);
+      const convId = existingConvId || env.conversation_id || env.message_id;
+      const displayName = env.display_name || this.peerNames.get(env.sender_id) || 'Unknown';
+      await this.conversationManager.getOrCreateConversation(convId, env.sender_id, displayName);
+      if (env.display_name) {
+        await this.conversationManager.updatePeerName(convId, env.sender_id, env.display_name);
+      }
+
+      // Update session displayName if this is a better value
+      const existing = this.peerSessions.get(env.sender_id);
+      if (existing && env.display_name && env.display_name !== existing.displayName) {
+        const updated: PeerSession = { ...existing, displayName: env.display_name };
+        this.peerSessions.set(env.sender_id, updated);
+        this.sessionSubscribers.forEach((cb) => cb(updated));
+      }
+
+      // Normalize conversation_id to local ID so messages appear in the receiver's chat
+      env.conversation_id = convId;
+
+      if (env.type === 'IMAGE') {
+        await receiveChunk(
+          env.message_id,
+          env.chunk_index,
+          env.chunk_total,
+          plaintext,
+          '',
+          '',
+          0,
+        );
+        logm(TAG, `Received image chunk ${env.chunk_index + 1}/${env.chunk_total} from ${env.sender_id}`);
+      } else {
+        await this.persistMessage(env, 'received', plaintext);
+        await this.conversationManager.updateLastMessage(convId, plaintext.substring(0, 100), env.type.toLowerCase());
+        logm(TAG, `Decrypted message from ${env.sender_id} (ep=${event.peerId}): ${plaintext.substring(0, 50)}`);
+        this.decryptedCallbacks.forEach((fn) => fn(env.sender_id, plaintext, env.conversation_id));
+      }
     } else {
-      await this.persistMessage(env, 'received', env.ciphertext);
       logm(TAG, `Received encrypted message from ${env.sender_id} (not decryptable by us — relaying)`);
     }
 
@@ -310,6 +519,7 @@ export class MessageRouter {
         ourKeyB64,
         nonce,
         authTag,
+        { displayName: this.displayName },
       );
       const serialized = serializeEnvelope(env);
       await this.transport.sendPayload(event.peerId, serialized);
@@ -350,22 +560,55 @@ export class MessageRouter {
     }
   }
 
-  private async persistMessage(env: MeshEnvelope, status: string, decryptedPayload?: string): Promise<void> {
+  private handlePeerDisconnected(event: { peerId: string }): void {
+    const fingerprint = this.endpointToFingerprint.get(event.peerId);
+    if (fingerprint) {
+      const session = this.peerSessions.get(fingerprint);
+      this.staleEndpointToFingerprint.set(event.peerId, fingerprint);
+      this.peerSessions.delete(fingerprint);
+      this.endpointToFingerprint.delete(event.peerId);
+      logm(TAG, `Peer disconnected: ${fingerprint.substring(0, 16)}... (ep=${event.peerId})`);
+      if (session) {
+        const cleared: PeerSession = { ...session, endpointId: '' };
+        this.sessionSubscribers.forEach((cb) => cb(cleared));
+      }
+    }
+  }
+
+  private async persistMessage(env: MeshEnvelope, status: string, decryptedPayload?: string): Promise<string | null> {
     try {
+      let recordId: string | null = null;
       await database.write(async () => {
-        await database.get<Message>('messages').create((msg) => {
+        const record = await database.get<Message>('messages').create((msg) => {
           msg.senderId = env.sender_id;
           msg.receiverId = '';
-          msg.conversationId = env.message_id;
+          msg.conversationId = env.conversation_id || env.message_id;
           msg.type = env.type.toLowerCase() as any;
           msg.payload = decryptedPayload ?? env.ciphertext;
           msg.nonce = env.nonce;
           msg.ttl = env.ttl;
           msg.status = status as any;
         });
+        recordId = record.id;
       });
+      return recordId;
     } catch (err: any) {
       errm(TAG, 'persistMessage failed', err);
+      return null;
+    }
+  }
+
+  private async updateMessageStatus(recordId: string, status: string): Promise<void> {
+    try {
+      await database.write(async () => {
+        const record = await database.get<Message>('messages').find(recordId);
+        await record.update((msg) => {
+          msg.status = status as any;
+        });
+      });
+      logm(TAG, `updateMessageStatus: ${recordId} → ${status}`);
+    } catch (err: any) {
+      errm(TAG, `updateMessageStatus failed for ${recordId}`, err);
     }
   }
 

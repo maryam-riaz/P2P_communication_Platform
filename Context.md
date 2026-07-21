@@ -190,12 +190,6 @@ Two Samsung devices (A33 API 36, A32 API 33) — bidirectional "hello world" exc
 - **Relay forwarding** ⏳ — mathematically guaranteed (wrong shared key → `nacl.secretbox.open` returns null) but not yet physically verified with 3 devices
 - **Role credential verification** ⏳ — code written but untested; requires deployed Supabase Edge Function + `CREDENTIAL_PUBLIC_KEY` env var
 
-### Verification result
-- **2-device key exchange** ✅ — devices exchange X25519 public keys on connect via `ROLE_CREDENTIAL` envelope; confirmed working in Phase 3 test pass
-- **2-device encrypted messaging** ✅ — `sendMessage()` encrypts with per-peer shared key, receiver decrypts successfully; decrypted content visible in Routing Log
-- **Relay forwarding** ⏳ — mathematically guaranteed (wrong shared key → `nacl.secretbox.open` returns null) but not yet physically verified with 3 devices
-- **Role credential verification** ⏳ — code written but untested; requires deployed Supabase Edge Function + `CREDENTIAL_PUBLIC_KEY` env var
-
 ### Bugs fixed
 1. **`expo-secure-store` version mismatch** — `57.0.1` (SDK 57) was incompatible with Expo SDK 54; pinned to `14.0.0` which provides `AnyTypeCache` matching bundled `expo-modules-kotlin`
 2. **`no PRNG` crash** — React Native lacks `global.crypto`; added `react-native-get-random-values` polyfill at app root (`app/_layout.tsx` import) so `tweetnacl.randomBytes()` has a source of entropy. Initial fix (`import` in `KeyManager.ts`) didn't work due to Hermes bundler ordering; moved to root entry point resolved it. Requires full `npx expo run:android` build (dev client `a` key) for polyfill to take effect.
@@ -244,3 +238,187 @@ onPayloadReceived
 - `packages/mobile/src/screens/app/SecurityScreen.tsx` — encryption debug UI
 - `packages/mobile/src/screens/app/MeshRoutingScreen.tsx` — routing + encryption test UI
 - `packages/mobile/supabase/functions/sign-credential/index.ts` — Edge Function
+
+---
+
+## Phase 4 — Chat (Text, Images) Over Mesh (✅ Completed)
+
+**Goal:** Wire chat UI to mesh transport + routing + security layers. Implement chunked image transfer with reassembly. Persist all messages via WatermelonDB with conversation/thread model.
+
+### What changed
+
+#### DB Schema v3→v4 (3 new tables, 1 modified)
+- **`media_chunks` modified** — added `file_name`, `mime_type`, `file_size` columns for cross-media-type support (image/video/audio all reuse same table)
+- **`media_transfers`** — per-file transfer metadata: `record_id`, `message_id`, `file_name`, `mime_type`, `file_size`, `total_chunks`, `received_chunks`, `local_uri`, `status` (receiving/complete/failed)
+- **`conversations`** — `conversation_id`, `last_message_preview`, `last_message_at`, `last_message_type`
+- **`conversation_participants`** — `conversation_id`, `peer_id` (fingerprint), `peer_name`, `last_read_at` (for unread count). Lookup: find conversation where both self and peer are participants
+
+#### 3 new WatermelonDB models
+| Model | Key fields |
+|---|---|
+| `Conversation` | `conversationId`, `lastMessagePreview`, `lastMessageAt`, `lastMessageType` |
+| `ConversationParticipant` | `conversationId`, `peerId`, `peerName`, `lastReadAt` |
+| `MediaTransfer` | `recordId`, `messageId`, `fileName`, `mimeType`, `fileSize`, `totalChunks`, `receivedChunks`, `localUri`, `status` |
+
+#### MeshEnvelope — `conversation_id` field added
+- Added `conversation_id: string` to `MeshEnvelope` interface so sender embeds which conversation a message belongs to; relay nodes forward untouched; receiver uses it for DB persistence
+
+#### ConversationManager (`src/p2p/ConversationManager.ts`)
+- `getOrCreateConversation(conversationId, peerId, peerName)` — auto-creates conversation + participant records on first message
+- `lookupConversationByPeer(peerId)` — finds existing conversation by scanning participants table
+- `updateLastMessage(conversationId, preview, type)` — updates conversation metadata on each send/receive
+- `getUnreadCount(conversationId, peerId)` / `markRead(conversationId, peerId)` — unread tracking
+- `observeConversations()` / `observeMessages(conversationId)` — WatermelonDB reactive observables for UI
+
+#### Chunked Image Transfer Pipeline
+
+**`ImageChunker.ts`** — `chunkFile(uri, chunkSize=128KB)`:
+- Reads file as base64 via `expo-file-system`
+- Splits into N chunks of specified size
+- Returns `{ chunks, totalChunks, fileId, fileSize }`
+
+**`ImageSender.ts`** — `sendImage(endpointId, uri, name, conversationId, mimeType, onProgress)`:
+- Calls `chunkFile()` → sends each chunk via `messageRouter.sendToPeer()` with `type: 'IMAGE'`, `chunkIndex`, `chunkTotal`
+- Reports progress per-chunk via callback
+
+**`ChunkAssembler.ts`** — `receiveChunk()` / `reassemble()`:
+- Stores each chunk in `media_chunks` table
+- Upserts `media_transfers` row, increments `received_chunks`
+- When `received_chunks === total_chunks`: concatenates base64, writes to `FileSystem.cacheDirectory/mesh-images/` via `writeBase64ToCache()`, updates `media_transfer` status to `'complete'`, creates `messages` record with `localUri` as payload
+- Subscribable progress (`subscribeChunkProgress`) and completion (`subscribeImageComplete`) callbacks
+
+**`mediaCache.ts`** — filesystem cache helpers: `ensureCacheDir()`, `writeBase64ToCache()`, `readFileAsBase64()`, `evictOldImages()`
+
+#### MessageRouter updates
+- `sendMessage()` / `sendToPeer()` — added `chunkIndex`, `chunkTotal`, `conversationId` to opts; all forwarded to `createEnvelope()`
+- `handlePayloadReceived()` — if `env.type === 'IMAGE'`, forwards decrypted chunk to `ChunkAssembler.receiveChunk()` instead of treating as text
+- `subscribeDecrypted()` callback signature now includes optional `conversationId` parameter
+- `persistMessage()` uses `env.conversation_id` (falls back to `env.message_id`)
+
+#### ChatListScreen — wired to real data
+- Replaces `MOCK_CONVERSATIONS` with WatermelonDB query on `conversations` table
+- "Discovered Peers Nearby" section shows live peers from `meshTransport.getAllPeers()`
+- Online/offline status from `meshTransport.getConnectedPeers()`
+- Real-time refresh via mesh transport event subscriptions (`onPeerFound`, `onPeerLost`, on connect/disconnect)
+- Navigates to Chat with `conversationId`, `endpointId`, `peerId`, `recipientName`
+
+#### ChatScreen — wired to mesh + image transfer
+- Messages loaded from DB via `database.get<Message>('messages').observe()` filtered by `conversationId`
+- **Send text:** `handleSendMessage()` → `messageRouter.ensureConversation()` then `messageRouter.sendToPeer()` (persists plaintext internally as `pending`) → status updated `pending`→`sent`/`failed` by querying conversation messages
+- **Receive text:** `handlePayloadReceived()` persists message + auto-creates Conversation/Participant records; `subscribeDecrypted()` is now log-only (no duplicate DB write)
+- **Send image:** `handlePickAttachment()`/`handleLaunchCamera()` for images → `ImageSender.sendImage()` → chunked send with progress bar
+- **Receive image:** `subscribeChunkProgress()` updates progress bar; `subscribeImageComplete()` creates `messages` record with `localUri` + `messageRouter.updateConversationPreview()`
+- **Voice recording, camera, attachment picker, audio/video playback, image preview modal** — preserved from existing UI
+- Peer active status checked periodically via `meshTransport.getConnectedPeers()`
+
+#### Navigation cleanup
+- Removed unused duplicate `ChatStack` component from `AppStack.tsx`
+
+#### Post-Phase-4 bug fixes (2026-07-21)
+| Bug | Root Cause | Fix |
+|---|---|---|
+| 3 messages per send | ChatScreen initial `database.write()` + `sendToPeer()`'s `persistMessage()` + flood-relay from peer created 3 DB records per send | Removed ChatScreen's initial write; `sendToPeer()` stores plaintext (not ciphertext); added `dedup.add(env.message_id)` before send so relay-back is deduped; `subscribeDecrypted()` no longer persists to DB |
+| Received messages invisible in chat list | `handlePayloadReceived()` never created Conversation/ConversationParticipant records — only the `messages` row existed | Added `conversationManager.getOrCreateConversation()` and `updatePeerName()` in `handlePayloadReceived()` after successful decrypt; sender also calls `ensureConversation()` before `sendToPeer()` |
+| Peer display name not exchanged | `MeshEnvelope` had no `display_name` field; ROLE_CREDENTIAL carried only the public key | Added `display_name` to `MeshEnvelope` + `createEnvelope()` opts; `handlePeerConnected()` passes `this.displayName`; `handlePayloadReceived()` stores names in `peerNames` map; `AppStack.tsx` syncs Redux `state.auth.user` → `messageRouter.setDisplayName()` |
+
+### Dependencies added
+| Package | Version | Purpose |
+|---|---|---|
+| `expo-file-system` | ~18.0.0 | Read image files, write reassembled images to cache |
+
+### Files created (8)
+| File | Purpose |
+|---|---|
+| `src/db/models/Conversation.ts` | WatermelonDB model |
+| `src/db/models/ConversationParticipant.ts` | WatermelonDB model |
+| `src/db/models/MediaTransfer.ts` | WatermelonDB model |
+| `src/p2p/ConversationManager.ts` | Conversation lifecycle + observe helpers |
+| `src/p2p/ImageChunker.ts` | Split image file into base64 chunks |
+| `src/p2p/ImageSender.ts` | Send chunked image over mesh + progress |
+| `src/p2p/ChunkAssembler.ts` | Accumulate/reassemble received chunks |
+| `src/utils/mediaCache.ts` | Filesystem cache helpers |
+
+### Files modified (12)
+| File | Change |
+|---|---|
+| `src/nearby/types.ts` | Added `conversation_id`, `display_name` to MeshEnvelope |
+| `src/p2p/MessageEnvelope.ts` | Accept `conversationId`, `displayName` in `createEnvelope()` |
+| `src/p2p/MessageRouter.ts` | IMAGE type handling, chunk progress, conversation_id/display_name pass-through, dedup on send, plaintext persist, auto-create conversations on receive, peer name exchange |
+| `src/p2p/conversationManager.ts` | Added `updatePeerName()` method |
+| `src/p2p/index.ts` | Export new managers |
+| `src/db/schema.ts` | v4: 3 new tables + 3 columns on media_chunks |
+| `src/db/migrations.ts` | v3→v4 migration (addColumns + 3 createTable) |
+| `src/db/models/MediaChunk.ts` | Added file_name, mime_type, file_size fields |
+| `src/db/models/index.ts` | Export 3 new models |
+| `src/db/index.ts` | Register 3 new models + v4 migration |
+| `src/navigation/AppStack.tsx` | Remove dead ChatStack; sync Redux `state.auth.user` → `messageRouter.setDisplayName()` |
+| `src/screens/app/ChatScreen.tsx` | Mesh send/receive, chunked image progress; removed duplicate DB writes; removed subscribeDecrypted persistence |
+| `package.json` | Added expo-file-system |
+
+### Test plan
+| Test | Verification |
+|---|---|---|
+| 2-device text chat | A→B send/receive visible in chat bubbles with correct sender labels |
+| 2-device image transfer | A sends photo → progress bar on both sides → full image on recipient |
+| Conversation persistence | Close + reopen app → conversations + messages restored |
+| Unread badges | New message from peer → badge on conversation list |
+| 3-device relayed text | A→B→C: B relays ciphertext, C decrypts + displays |
+| 3-device relayed image | A→B→C: B relays each ciphertext chunk, C reassembles |
+| Offline queue | Send while peer disconnected → message queued → flushed on reconnect |
+
+### Post-Phase-4 bug fixes (second round — 2026-07-21)
+| Bug | Root Cause | Fix |
+|---|---|---|
+| Messages show "pending" / not received (existing conversations) | `ChatListScreen.openConversation` passed fingerprint as `endpointId`, but `sendToPeer` needs Nearby endpoint ID | `sendToPeer` resolves fingerprint → endpointId via `PeerSession` map |
+| Messages invisible on receiver side | `openChat` always generated new `conversationId` even when conversation for peer existed | Added `getPeerSession` lookup; no duplicate conversations |
+| Display name shows package name / blank | `advertise()` called with no `deviceName`; nearby list used raw `PeerInfo.displayName` not exchanged username | `MeshRoutingScreen` passes `deviceName: messageRouter.getDisplayName()`; nearby list uses `PeerSession.displayName` |
+| Stale endpointId across reconnections | No reverse mapping from fingerprint to endpointId | `endpointToFingerprint` index, torn down on disconnect |
+| Sent messages stay "pending" on sender | `sendToPeer()` never updated status after successful send | Removed ChatScreen compensation; IMAGE skips persistMessage; TEXT status updates in sendToPeer |
+| Image chunks show as blank/black on sender | Each chunk created a separate `messages` record with base64 payloads | `sendToPeer()` skips `persistMessage()` for IMAGE; `ImageSender` creates single record with `payload=imageUri` |
+| Image not received/reassembled on receiver | Each chunk had unique `message_id` so `ChunkAssembler` couldn't group them | `sendToPeer()` accepts `messageId` opt; `ImageSender` passes shared `fileId` as `messageId`; dedup skipped for IMAGE |
+| Unread count never decrements | Counted all messages without `lastReadAt` filter; `ChatScreen` never called `markRead()` | Added `lastReadAt` filter; `useFocusEffect` calls `markConversationRead()` |
+| Android bundling failed — `'return' outside of function` at ChatScreen.tsx:765 | Orphaned duplicate `setTimeout` + `};` left behind from `sendImageMessage` edit | Deleted orphaned lines 310-317 that prematurely closed the component scope |
+| Text not received at the other end | `persistMessage` wrote with `env.conversation_id` (sender's ID) but receiver's ChatScreen queries its own local conversation ID | Set `env.conversation_id = convId` before `persistMessage` so message is stored under receiver's local conversation |
+| Images duplicated and blank/black on receiver | (a) IMAGE type skipped dedup entirely — each relayed copy of every chunk was re-processed, amplified by flood relay until TTL exhausted. (b) Parallel `receiveChunk` calls all saw `allChunks.length >= chunkTotal` and each triggered `reassemble`, creating 10× messages. Some fired before all chunks arrived → invalid base64 | (a) IMAGE dedup uses composite key `messageId + chunkIndex` so each duplicate chunk is rejected. (b) Duplicate chunk guard in `receiveChunk` — skip if same `recordId`+`chunkIndex` already exists. (c) Reassembly guard — `reassembled Set` ensures `reassemble` fires only once per `recordId` |
+| Sent text not received by the other device | `ChatScreen.handleSendMessage()` used stale `endpointId` from navigation params; peer reconnection (disconnect + new Nearby endpoint ID) leaves the old endpointId in the route, but `sendToPeer`'s resolution only handled fingerprint→endpointId lookup, not stale endpointId→current endpointId | Added `MessageRouter.resolveEndpointId()` that checks 3 maps in order: `endpointToFingerprint` (current), `peerSessions` by fingerprint, and new `staleEndpointToFingerprint` (preserved across disconnects). `handlePeerDisconnected` saves stale mapping; `handlePayloadReceived` clears it on reconnect. `ChatScreen.handleSendMessage()` calls `resolveEndpointId()` before each send. |
+| Sent text stays "pending" on sender | `sendToPeer()` persisted message with `status='pending'` but never updated to `'sent'` after `sendPayload` succeeded. Only `ImageSender` had its own compensation. | `persistMessage()` returns the created record's WatermelonDB `id`. `sendToPeer()` stores `pendingRecordId`, then calls new `updateMessageStatus(pendingRecordId, 'sent')` after successful `sendPayload`. |
+| Multiple blank images after actual image | (a) `subscribeImageComplete` callback used fire-and-forget `.then()` chain — if it fired twice (React strict-mode or `useEffect` re-registration), multiple `messages` records created. Incomplete base64 from races produced blank images. (b) `receiveChunk` checked `allChunks.length >= chunkTotal` which could pass with duplicate chunk indices | (a) Callback is now `async` with `await`, has `completedRecords` Set guard and DB-level dedup query before creating a record. (b) `receiveChunk` checks `uniqueIndices.size >= chunkTotal` (unique indices via Set) instead of raw `allChunks.length` |
+
+### Architecture: PeerSession
+- **Creation:** `handlePayloadReceived` ROLE_CREDENTIAL branch — session populated at verified handshake
+- **Teardown:** `handlePeerDisconnected` — session deleted, subscribers notified with cleared endpointId
+- **Observable:** `subscribePeerSession(cb)` — fires on create/update/delete
+- **endpointToFingerprint** reverse index handles reconnection (new endpointId → same fingerprint)
+
+### Post-Phase-4 bug fixes (third round — 2026-07-22)
+| Bug | Root Cause | Fix |
+|---|---|---|
+| Sender's last sent message stays "pending" despite being received | `updateMessageStatus()` was inside `sendPayload`'s try-catch block. If status update threw (DB write conflict), the catch block silently swallowed it, logged a misleading "failed" message, and queued a pending message — even though the payload was sent successfully. | Moved `updateMessageStatus()` outside the `sendPayload` try-catch so a successful send always results in a status update. Added `return env` in the catch block on failure so status update never runs for failed sends. |
+| Relay loops cause blank images on sender's chat | (a) IMAGE dedup was skipped entirely during `sendToPeer()` — relayed copies from receiver were not recognized as duplicates. Sender's `handlePayloadReceived` would receive its own relayed chunks, fail to decrypt (encrypted for receiver), and call `persistMessage(env, 'received', ciphertext)` — creating a message record with `type='image'` and `payload=ciphertext`. The ChatScreen observer rendered each as `<Image uri={ciphertext}>`, showing blank images. For a 29-chunk image, this created 29 blank images. (b) Undecryptable messages (relayed by flood routing) were persisted to the main `messages` table with the original type preserved, creating phantom visible records. | (a) IMAGE dedup now uses composite key `messageId_chunkIndex` during send instead of being skipped entirely. (b) Removed `persistMessage()` call in the undecryptable branch of `handlePayloadReceived()` — relay nodes no longer create visible message records for traffic they forward. Messages are still persisted to `pending_messages` for store-carry-forward. |
+| `sendMessage()` (broadcast) never updated status to 'sent' | The broadcast method persisted messages with `status='pending'` but never called `updateMessageStatus()` after sending. | Added `updateMessageStatus(recordId, 'sent')` in the `sendMessage()` persist loop. |
+| ImageSender fragile status query | `ImageSender.sendImage()` queried ALL messages and filtered in-memory by `payload + status` to find the sender's record to update to 'sent'. This was fragile with concurrent sends and could match the wrong record. | Captures WatermelonDB record ID at creation time, uses `find(id)` + `update()` directly. |
+
+### Known issues
+- **Last sent message still shows "pending" despite being received** — The fix above (moving `updateMessageStatus` outside the catch block) addresses a code-path bug, but the user reports the issue persists specifically for the **last** message in a session. This suggests a timing/lifecycle issue where the final `database.write()` for the status update may not complete or the observer may not fire before the component state stabilizes. Debugging logging was added to `updateMessageStatus()` to confirm whether the function executes. New logcat output is needed to diagnose further.
+
+### Relevant paths
+- `packages/mobile/src/db/schema.ts` — v4 schema
+- `packages/mobile/src/db/migrations.ts` — v3→v4 migration
+- `packages/mobile/src/db/models/Conversation.ts` — Conversation model
+- `packages/mobile/src/db/models/ConversationParticipant.ts` — Participant model
+- `packages/mobile/src/db/models/MediaTransfer.ts` — Media transfer tracking
+- `packages/mobile/src/db/models/MediaChunk.ts` — Updated with file metadata
+- `packages/mobile/src/p2p/ConversationManager.ts` — Conversation lifecycle
+- `packages/mobile/src/p2p/ImageChunker.ts` — File chunking
+- `packages/mobile/src/p2p/ImageSender.ts` — Chunked image send
+- `packages/mobile/src/p2p/ChunkAssembler.ts` — Chunk receive + reassembly
+- `packages/mobile/src/utils/mediaCache.ts` — Filesystem cache
+- `packages/mobile/src/p2p/MessageRouter.ts` — IMAGE type handling, PeerSession, endpoint resolution, messageId opt, markConversationRead
+- `packages/mobile/src/nearby/types.ts` — MeshEnvelope with conversation_id
+- `packages/mobile/src/screens/app/ChatListScreen.tsx` — Real chat list, PeerSession lookup, unread fix, PeerSession displayName for nearby
+- `packages/mobile/src/screens/app/ChatScreen.tsx` — Mesh-wired chat, reactive displayName, markConversationRead on focus
+- `packages/mobile/src/navigation/AppStack.tsx` — Cleaned up navigation
+- `packages/mobile/src/p2p/ConversationManager.ts` — Conversation lifecycle with updatePeerName
+- `packages/mobile/src/p2p/index.ts` — Re-exports PeerSession
+- `packages/mobile/src/screens/app/MeshRoutingScreen.tsx` — Passes deviceName to advertise()
+- `packages/mobile/src/utils/mediaCache.ts` — Legacy expo-file-system import

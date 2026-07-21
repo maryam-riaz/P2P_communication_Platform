@@ -693,6 +693,7 @@ Core routing singleton wrapping `meshTransport`. Wires event handlers in constru
 
 | File | Purpose |
 |---|---|
+
 | `KeyManager.ts` | X25519 keypair generation via `tweetnacl`; private key persisted to `expo-secure-store`; SHA-512/32 hex fingerprint for display/QR |
 | `MessageCipher.ts` | `encryptForPeer()` / `decryptFromPeer()` using `nacl.box.before()` (X25519 DH → shared secret) + `nacl.secretbox()` (XSalsa20-Poly1305); 24-byte random nonce per message |
 | `KeyExchange.ts` | TOFU (trust-on-first-use) peer key registry; `registerPeerKey(peerId, publicKeyB64)` stores public key + derives fingerprint; `getPublicKey(peerId)` / `hasPeerKey(peerId)` for lookup |

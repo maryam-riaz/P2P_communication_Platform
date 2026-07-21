@@ -18,10 +18,20 @@ import {
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { useFocusEffect } from '@react-navigation/native';
+import { Q } from '@nozbe/watermelondb';
 import * as DocumentPicker from 'expo-document-picker';
 import * as ImagePicker from 'expo-image-picker';
 import { Audio, Video, ResizeMode } from 'expo-av';
 import { Image } from 'expo-image';
+import { database } from '../../db';
+import { Message as MessageModel } from '../../db/models';
+import { messageRouter } from '../../p2p';
+import { meshTransport } from '../../nearby';
+import { sendImage } from '../../p2p/ImageSender';
+import { subscribeChunkProgress, subscribeImageComplete } from '../../p2p/ChunkAssembler';
+import { logm, errm } from '../../utils/logger';
+
+const TAG = 'CHAT';
 
 interface Attachment {
   uri: string;
@@ -38,13 +48,16 @@ interface DisplayMessage {
   attachment?: Attachment;
 }
 
-const MOCK_INITIAL_MESSAGES: DisplayMessage[] = [
-  { id: 'm1', senderId: 'other', text: 'Hello! I saw your signal. Are you okay?', timestamp: '10:32 AM', status: 'read', attachment: undefined },
-  { id: 'm2', senderId: 'user', text: 'Yes, but I need medical supplies urgently.', timestamp: '10:33 AM', status: 'read', attachment: undefined },
-  { id: 'm3', senderId: 'other', text: 'Stay where you are. Help is on the way.', timestamp: '10:34 AM', status: 'read', attachment: undefined },
-];
+let msgCounter = 0;
 
-let msgCounter = 3;
+function generateId(): string {
+  msgCounter++;
+  return `msg_${Date.now()}_${msgCounter}`;
+}
+
+function formatTime(ts: number): string {
+  return new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+}
 
 export default function ChatScreen({ route, navigation }: any) {
   const insets = useSafeAreaInsets();
@@ -68,17 +81,18 @@ export default function ChatScreen({ route, navigation }: any) {
 
   const bottomPadding = isKeyboardOpen ? 0 : insets.bottom;
 
-  const person = route?.params?.person || { id: '', name: 'Chat' };
-  const recipientId: string = person.id || route?.params?.recipientId || '';
-  const recipientName: string = person.name || route?.params?.recipientName || 'Chat';
+  const conversationId: string = route?.params?.conversationId || '';
+  const endpointId: string = route?.params?.endpointId || '';
+  const peerId: string = route?.params?.peerId || endpointId;
+  const recipientName: string = route?.params?.recipientName || 'Chat';
 
-  const [messages, setMessages] = useState<DisplayMessage[]>(MOCK_INITIAL_MESSAGES);
+  const [messages, setMessages] = useState<DisplayMessage[]>([]);
   const [inputText, setInputText] = useState('');
   const [isSending, setIsSending] = useState(false);
   const [isPicking, setIsPicking] = useState(false);
-  const [transferProgress] = useState<{ [msgId: string]: number }>({});
-  const [isPeerActive] = useState(true);
-  const [displayName] = useState(recipientName);
+  const [transferProgress, setTransferProgress] = useState<{ [msgId: string]: number }>({});
+  const [isPeerActive, setIsPeerActive] = useState(false);
+  const [displayName, setDisplayName] = useState(recipientName);
   const flatListRef = useRef<FlatList>(null);
 
   const [playingAudioId, setPlayingAudioId] = useState<string | null>(null);
@@ -109,28 +123,218 @@ export default function ChatScreen({ route, navigation }: any) {
     }, [navigation])
   );
 
-  const handleSendMessage = () => {
-    if (!inputText.trim() || !recipientId || isSending) return;
+  // ─── Load messages from DB ────────────────────────────────────────────────
+
+  useEffect(() => {
+    if (!conversationId) return;
+
+    const load = async () => {
+      try {
+        const records = await database.get<MessageModel>('messages')
+          .query(
+            Q.where('conversation_id', conversationId),
+            Q.sortBy('created_at', 'asc'),
+          )
+          .fetch();
+
+        const display: DisplayMessage[] = records.map((r) => ({
+          id: r.id,
+          senderId: r.senderId === messageRouter.getDeviceId() ? 'user' : 'other',
+          text: r.type === 'image' ? '' : r.payload,
+          timestamp: r.createdAt ? formatTime(r.createdAt.getTime()) : '',
+          status: r.status,
+          attachment: r.type === 'image' ? { uri: r.payload, type: 'image', name: 'Image' } : undefined,
+        }));
+
+        setMessages(display);
+      } catch (err) {
+        errm(TAG, 'Failed to load messages', err);
+      }
+    };
+
+    load();
+
+    const subscription = database.get<MessageModel>('messages')
+      .query(
+        Q.where('conversation_id', conversationId),
+        Q.sortBy('created_at', 'asc'),
+      )
+      .observe();
+
+    const sub = subscription.subscribe((records) => {
+      const display: DisplayMessage[] = records.map((r) => ({
+        id: r.id,
+        senderId: r.senderId === messageRouter.getDeviceId() ? 'user' : 'other',
+        text: r.type === 'image' ? '' : r.payload,
+        timestamp: r.createdAt ? formatTime(r.createdAt.getTime()) : '',
+        status: r.status,
+        attachment: r.type === 'image' ? { uri: r.payload, type: 'image', name: 'Image' } : undefined,
+      }));
+      setMessages(display);
+    });
+
+    return () => sub.unsubscribe();
+  }, [conversationId]);
+
+  // ─── Subscribe to PeerSession for reactive displayName ────────────────────
+
+  useEffect(() => {
+    const unsub = messageRouter.subscribePeerSession((session) => {
+      if ((session.fingerprint === peerId || session.endpointId === endpointId) && session.displayName) {
+        setDisplayName(session.displayName);
+      }
+    });
+    return unsub;
+  }, [peerId, endpointId]);
+
+  // ─── Subscribe to incoming decrypted messages ─────────────────────────────
+
+  useEffect(() => {
+    const unsub = messageRouter.subscribeDecrypted(
+      (senderId: string, plaintext: string, msgConversationId?: string) => {
+        if (msgConversationId && msgConversationId !== conversationId) return;
+        logm(TAG, `Decrypted message from ${senderId}: ${plaintext.substring(0, 40)}`);
+      },
+    );
+
+    return () => unsub();
+  }, [conversationId]);
+
+  // ─── Subscribe to chunk progress ──────────────────────────────────────────
+
+  useEffect(() => {
+    const completedRecords = new Set<string>();
+
+    const unsubProgress = subscribeChunkProgress((recordId, received, total) => {
+      const pct = Math.round((received / total) * 100);
+      setTransferProgress((prev) => ({ ...prev, [recordId]: pct }));
+    });
+
+    const unsubComplete = subscribeImageComplete(async (recordId, localUri, messageId) => {
+      if (completedRecords.has(recordId)) return;
+      completedRecords.add(recordId);
+
+      logm(TAG, `Image reassembled: ${recordId} → ${localUri}`);
+
+      try {
+        const existing = await database.get<MessageModel>('messages')
+          .query(
+            Q.where('conversation_id', conversationId),
+            Q.where('type', 'image'),
+            Q.where('payload', localUri),
+          )
+          .fetch();
+
+        if (existing.length > 0) {
+          logm(TAG, `Image ${recordId} already persisted, skipping`);
+          return;
+        }
+
+        await database.write(async () => {
+          await database.get<MessageModel>('messages').create((msg) => {
+            msg.senderId = peerId;
+            msg.receiverId = messageRouter.getDeviceId();
+            msg.conversationId = conversationId;
+            msg.type = 'image';
+            msg.payload = localUri;
+            msg.nonce = '';
+            msg.ttl = 4;
+            msg.status = 'received';
+          });
+        });
+
+        await messageRouter.updateConversationPreview(conversationId, '📷 Image', 'image');
+      } catch (err) {
+        errm(TAG, 'Failed to persist received image', err);
+      }
+
+      setTransferProgress((prev) => {
+        const next = { ...prev };
+        delete next[recordId];
+        return next;
+      });
+    });
+
+    return () => {
+      unsubProgress();
+      unsubComplete();
+    };
+  }, [conversationId, peerId]);
+
+  // ─── Check peer connectivity ──────────────────────────────────────────────
+
+  useEffect(() => {
+    const check = async () => {
+      try {
+        const connected = await meshTransport.getConnectedPeers();
+        setIsPeerActive(connected.some((p: any) => p.endpointId === endpointId));
+      } catch { setIsPeerActive(false); }
+    };
+    check();
+    const interval = setInterval(check, 5000);
+    return () => clearInterval(interval);
+  }, [endpointId]);
+
+  // ─── Mark conversation read on focus ───────────────────────────────────
+
+  useFocusEffect(
+    useCallback(() => {
+      if (conversationId && peerId) {
+        messageRouter.markConversationRead(conversationId, peerId);
+      }
+    }, [conversationId, peerId]),
+  );
+
+  // ─── Send text message ────────────────────────────────────────────────────
+
+  const handleSendMessage = async () => {
+    if (!inputText.trim() || !endpointId || isSending) return;
     const text = inputText.trim();
     setInputText('');
     setIsSending(true);
-    msgCounter++;
-    const newMsg: DisplayMessage = {
-      id: `m${msgCounter}`,
-      senderId: 'user',
-      text,
-      timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-      status: 'sent',
-    };
-    setMessages((prev) => [...prev, newMsg]);
-    setTimeout(() => {
-      setMessages((prev) =>
-        prev.map((m) => (m.id === newMsg.id ? { ...m, status: 'delivered' } : m))
-      );
-    }, 1000);
-    setTimeout(() => flatListRef.current?.scrollToEnd({ animated: true }), 100);
-    setIsSending(false);
+
+    try {
+      const resolvedEndpointId = messageRouter.resolveEndpointId(endpointId);
+      if (!resolvedEndpointId) {
+        logm(TAG, 'No valid endpointId for peer, message queued');
+        return;
+      }
+      await messageRouter.ensureConversation(conversationId, peerId, recipientName);
+
+      await messageRouter.sendToPeer(resolvedEndpointId, 'TEXT', text, { conversationId });
+      logm(TAG, 'Message sent successfully');
+    } catch (err) {
+      errm(TAG, 'Failed to send message', err);
+    } finally {
+      setIsSending(false);
+    }
   };
+
+  // ─── Send image ───────────────────────────────────────────────────────────
+
+  const sendImageMessage = async (imageUri: string, imageName: string) => {
+    if (!endpointId) return;
+
+    setIsSending(true);
+    await messageRouter.ensureConversation(conversationId, peerId, recipientName);
+
+    const mimeType = imageName.toLowerCase().endsWith('.png') ? 'image/png' : 'image/jpeg';
+
+    await sendImage(endpointId, imageUri, imageName, conversationId, mimeType, (sent, total) => {
+      const pct = Math.round((sent / total) * 100);
+      setTransferProgress((prev) => ({ ...prev, ['img_sending']: pct }));
+    });
+
+    setIsSending(false);
+    setTimeout(() => {
+      setTransferProgress((prev) => {
+        const next = { ...prev };
+        delete next['img_sending'];
+        return next;
+      });
+    }, 500);
+  };
+  // ─── Attachment picker ────────────────────────────────────────────────────
 
   const handlePickAttachment = async () => {
     if (isPicking || isSending) return;
@@ -145,21 +349,28 @@ export default function ChatScreen({ route, navigation }: any) {
       let type: 'image' | 'video' | 'audio' = 'image';
       const mime = asset.mimeType || '';
       const nameLower = asset.name.toLowerCase();
-      if (mime.startsWith('image/') || nameLower.match(/\.(jpg|jpeg|png|gif|webp)$/)) type = 'image';
-      else if (mime.startsWith('video/') || nameLower.match(/\.(mp4|mov|m4v|3gp|avi|mkv)$/)) type = 'video';
-      else if (mime.startsWith('audio/') || nameLower.match(/\.(mp3|wav|m4a|aac|ogg|flac)$/)) type = 'audio';
-      setIsSending(true);
-      msgCounter++;
-      const newMsg: DisplayMessage = {
-        id: `m${msgCounter}`,
-        senderId: 'user',
-        text: '',
-        timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-        status: 'sent',
-        attachment: { uri: asset.uri, type, name: asset.name || `doc-${Date.now()}` },
-      };
-      setMessages((prev) => [...prev, newMsg]);
-      setTimeout(() => flatListRef.current?.scrollToEnd({ animated: true }), 100);
+      if (mime.startsWith('image/') || nameLower.match(/\.(jpg|jpeg|png|gif|webp)$/)) {
+        type = 'image';
+      } else if (mime.startsWith('video/') || nameLower.match(/\.(mp4|mov|m4v|3gp|avi|mkv)$/)) {
+        type = 'video';
+      } else if (mime.startsWith('audio/') || nameLower.match(/\.(mp3|wav|m4a|aac|ogg|flac)$/)) {
+        type = 'audio';
+      }
+
+      if (type === 'image') {
+        await sendImageMessage(asset.uri, asset.name || `image-${Date.now()}.jpg`);
+      } else {
+        const newMsg: DisplayMessage = {
+          id: generateId(),
+          senderId: 'user',
+          text: '',
+          timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+          status: 'sent',
+          attachment: { uri: asset.uri, type, name: asset.name || `doc-${Date.now()}` },
+        };
+        setMessages((prev) => [...prev, newMsg]);
+        setTimeout(() => flatListRef.current?.scrollToEnd({ animated: true }), 100);
+      }
     } catch (err) {
       console.error('[ChatScreen] Attachment processing failed:', err);
     } finally {
@@ -167,6 +378,8 @@ export default function ChatScreen({ route, navigation }: any) {
       setIsSending(false);
     }
   };
+
+  // ─── Camera capture ───────────────────────────────────────────────────────
 
   const handleLaunchCamera = () => {
     if (isPicking || isSending) return;
@@ -222,21 +435,26 @@ export default function ChatScreen({ route, navigation }: any) {
         return;
       }
       const asset = result.assets[0];
-      const type = asset.type === 'video' ? 'video' : 'image';
-      setIsSending(true);
-      const extension = type === 'video' ? 'mp4' : 'jpg';
-      const name = asset.fileName || `camera-${Date.now()}.${extension}`;
-      msgCounter++;
-      const newMsg: DisplayMessage = {
-        id: `m${msgCounter}`,
-        senderId: 'user',
-        text: '',
-        timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-        status: 'sent',
-        attachment: { uri: asset.uri, type, name },
-      };
-      setMessages((prev) => [...prev, newMsg]);
-      setTimeout(() => flatListRef.current?.scrollToEnd({ animated: true }), 100);
+      const assetType = asset.type === 'video' ? 'video' : 'image';
+
+      if (assetType === 'image') {
+        const extension = 'jpg';
+        const name = asset.fileName || `camera-${Date.now()}.${extension}`;
+        await sendImageMessage(asset.uri, name);
+      } else {
+        setIsSending(true);
+        const name = asset.fileName || `camera-${Date.now()}.mp4`;
+        const newMsg: DisplayMessage = {
+          id: generateId(),
+          senderId: 'user',
+          text: '',
+          timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+          status: 'sent',
+          attachment: { uri: asset.uri, type: 'video', name },
+        };
+        setMessages((prev) => [...prev, newMsg]);
+        setTimeout(() => flatListRef.current?.scrollToEnd({ animated: true }), 100);
+      }
     } catch (err) {
       console.error('[ChatScreen] Camera capture processing failed:', err);
     } finally {
@@ -244,6 +462,8 @@ export default function ChatScreen({ route, navigation }: any) {
       setIsSending(false);
     }
   };
+
+  // ─── Voice recording ──────────────────────────────────────────────────────
 
   const startRecording = async () => {
     try {
@@ -258,7 +478,6 @@ export default function ChatScreen({ route, navigation }: any) {
         playsInSilentModeIOS: true,
       });
 
-      console.log('[Audio Recorder] Starting native audio recording...');
       const recording = new Audio.Recording();
       await recording.prepareToRecordAsync(Audio.RecordingOptionsPresets.HIGH_QUALITY);
       await recording.startAsync();
@@ -287,9 +506,8 @@ export default function ChatScreen({ route, navigation }: any) {
       if (!uri) return;
       setIsSending(true);
       const fileName = `voice-note-${Date.now()}.m4a`;
-      msgCounter++;
       const newMsg: DisplayMessage = {
-        id: `m${msgCounter}`,
+        id: generateId(),
         senderId: 'user',
         text: '',
         timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
@@ -307,31 +525,28 @@ export default function ChatScreen({ route, navigation }: any) {
 
   const cancelRecording = async () => {
     if (!recordingRef.current) return;
-
     clearInterval(recordingInterval.current);
     const recording = recordingRef.current;
     recordingRef.current = null;
     setIsRecording(false);
     setRecordingDuration(0);
-
     try {
-      console.log('[Audio Recorder] Discarding recording...');
       await recording.stopAndUnloadAsync();
     } catch (err) {
       console.warn('[Audio Recorder] Cancel cleanup failed:', err);
     }
   };
 
+  // ─── Audio playback ───────────────────────────────────────────────────────
+
   const toggleAudioPlayback = async (msgId: string, audioUri: string) => {
     try {
       if (playingAudioId === msgId) {
-        // Pause
         if (soundRef.current) {
           await soundRef.current.pauseAsync();
           setPlayingAudioId(null);
         }
       } else {
-        // Stop previous sound
         if (soundRef.current) {
           try {
             await soundRef.current.stopAsync();
@@ -340,7 +555,6 @@ export default function ChatScreen({ route, navigation }: any) {
           soundRef.current = null;
         }
 
-        console.log('[Audio Player] Loading audio note for playback...');
         await Audio.setAudioModeAsync({
           allowsRecordingIOS: false,
           playsInSilentModeIOS: true,
@@ -374,6 +588,8 @@ export default function ChatScreen({ route, navigation }: any) {
     }
   };
 
+  // ─── Progress bar rendering ───────────────────────────────────────────────
+
   const renderProgressBar = (progress: number | undefined) => {
     if (progress === undefined) return null;
     return (
@@ -386,19 +602,21 @@ export default function ChatScreen({ route, navigation }: any) {
     );
   };
 
+  // ─── Attachment rendering ─────────────────────────────────────────────────
+
   const renderAttachment = (attachment: Attachment, msgId: string, status: string) => {
     const progress = transferProgress[msgId];
-    const isDownloaded = attachment.uri !== '';
+    const isDownloaded = attachment.uri !== '' && !attachment.uri.startsWith('file:///') === false;
 
     if (attachment.type === 'image') {
-      if (!isDownloaded) {
+      if (progress !== undefined) {
         return (
           <View style={[styles.imageAttachment, { backgroundColor: '#262626', justifyContent: 'center', alignItems: 'center', borderRadius: 8, padding: 12 }]}>
             <MaterialCommunityIcons name="image-outline" size={32} color="#666" />
             {status === 'failed' ? (
-              <Text style={{ color: '#FF3B30', fontSize: 11, marginTop: 4, textAlign: 'center' }}>Failed to download</Text>
+              <Text style={{ color: '#FF3B30', fontSize: 11, marginTop: 4, textAlign: 'center' }}>Failed to send</Text>
             ) : (
-              renderProgressBar(progress ?? 0)
+              renderProgressBar(progress)
             )}
           </View>
         );
@@ -463,12 +681,12 @@ export default function ChatScreen({ route, navigation }: any) {
     }
 
     if (attachment.type === 'video') {
-      if (!isDownloaded) {
+      if (progress !== undefined) {
         return (
           <View style={[styles.videoContainer, styles.videoPlaceholder]}>
             <MaterialCommunityIcons name="video-off-outline" size={32} color="#666" />
             <Text style={[styles.videoText, { color: status === 'failed' ? '#FF3B30' : '#CCC' }]} numberOfLines={1}>
-              {status === 'failed' ? 'Failed to download video' : 'Downloading video...'}
+              {status === 'failed' ? 'Failed to send video' : 'Sending video...'}
             </Text>
             {status !== 'failed' && renderProgressBar(progress ?? 0)}
           </View>
@@ -499,8 +717,6 @@ export default function ChatScreen({ route, navigation }: any) {
 
     return (
       <View style={styles.fileContainer}>
-
-
         <MaterialCommunityIcons name="file-document-outline" size={24} color="#FF8C42" />
         <Text style={styles.fileText} numberOfLines={1}>
           {attachment.name}
@@ -508,6 +724,8 @@ export default function ChatScreen({ route, navigation }: any) {
       </View>
     );
   };
+
+  // ─── Message bubble rendering ─────────────────────────────────────────────
 
   const renderMessageItem = ({ item }: { item: DisplayMessage }) => {
     const isUser = item.senderId === 'user';
@@ -529,7 +747,7 @@ export default function ChatScreen({ route, navigation }: any) {
                 name={
                   item.status === 'read'
                     ? 'check-all'
-                    : item.status === 'sent' || item.status === 'delivered'
+                    : item.status === 'sent'
                       ? 'check'
                       : item.status === 'failed'
                         ? 'alert-circle'
@@ -559,6 +777,8 @@ export default function ChatScreen({ route, navigation }: any) {
       </View>
     );
   };
+
+  // ─── UI ───────────────────────────────────────────────────────────────────
 
   return (
     <KeyboardAvoidingView

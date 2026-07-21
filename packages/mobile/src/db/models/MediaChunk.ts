@@ -10,6 +10,9 @@ export default class MediaChunk extends Model {
   @field('chunk_total') chunkTotal!: number;
   @field('data') data!: string;
   @field('nonce') nonce?: string;
+  @field('file_name') fileName?: string;
+  @field('mime_type') mimeType?: string;
+  @field('file_size') fileSize?: number;
   @readonly @date('created_at') createdAt!: Date;
   @readonly @date('updated_at') updatedAt!: Date;
 }

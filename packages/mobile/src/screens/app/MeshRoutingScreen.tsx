@@ -153,7 +153,7 @@ export default function MeshRoutingScreen() {
   const handleAdvertise = async () => {
     try {
       addLog('Starting advertising...');
-      await meshTransport.advertise();
+      await meshTransport.advertise({ deviceName: messageRouter.getDisplayName() });
       setIsAdvertising(true);
       addLog('Advertising started');
     } catch (e: any) {

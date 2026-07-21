@@ -15,6 +15,8 @@ export function createEnvelope(
     chunkIndex?: number;
     chunkTotal?: number;
     routeHistory?: string[];
+    conversationId?: string;
+    displayName?: string;
   },
 ): MeshEnvelope {
   return {
@@ -23,6 +25,8 @@ export function createEnvelope(
     sender_id: senderId,
     sender_role_cert: senderRoleCert,
     sender_public_key: senderPublicKey,
+    conversation_id: opts?.conversationId || '',
+    display_name: opts?.displayName || '',
     ttl: opts?.ttl ?? PER_TYPE_TTL[type],
     timestamp: Date.now(),
     chunk_index: opts?.chunkIndex ?? 0,

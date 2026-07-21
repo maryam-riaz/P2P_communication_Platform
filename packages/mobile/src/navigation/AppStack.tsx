@@ -1,7 +1,8 @@
-import React from 'react';
+import React, { useEffect } from 'react';
 import { View } from 'react-native';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
+import { useSelector } from 'react-redux';
 import MapScreen from '../screens/app/MapScreen';
 import ChatScreen from '../screens/app/ChatScreen';
 import AdvisorScreen from '../screens/app/AdvisorScreen';
@@ -12,6 +13,8 @@ import SecurityScreen from '../screens/app/SecurityScreen';
 import EmergencyFormScreen from '../screens/app/EmergencyFormScreen';
 import ChatListScreen from '../screens/app/ChatListScreen';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
+import type { RootState } from '../redux/store';
+import { messageRouter } from '../p2p';
 
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
@@ -45,19 +48,6 @@ function MapStack() {
 }
 
 function ChatListStack() {
-  return (
-    <Stack.Navigator
-      screenOptions={{
-        headerShown: false,
-      }}
-      initialRouteName="ChatListScreen"
-    >
-      <Stack.Screen name="ChatListScreen" component={ChatListScreen} />
-      <Stack.Screen name="Chat" component={ChatScreen} />
-    </Stack.Navigator>
-  );
-}
-function ChatStack() {
   return (
     <Stack.Navigator
       screenOptions={{
@@ -107,6 +97,13 @@ function ProfileStack() {
 
 export default function AppStack() {
   const insets = useSafeAreaInsets();
+  const userName = useSelector((state: RootState) => state.auth.user);
+
+  useEffect(() => {
+    if (userName) {
+      messageRouter.setDisplayName(userName);
+    }
+  }, [userName]);
 
   return (
     <Tab.Navigator
@@ -195,5 +192,3 @@ export default function AppStack() {
       </Tab.Navigator>
   );
 }
-
-

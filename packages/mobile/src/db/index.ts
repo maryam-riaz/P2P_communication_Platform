@@ -3,7 +3,18 @@ import SQLiteAdapter from '@nozbe/watermelondb/adapters/sqlite';
 
 import { schema } from './schema';
 import { migrations } from './migrations';
-import { User, Message, SosReport, MediaChunk, SyncOutbox, PendingMessage, PeerKey } from './models';
+import {
+  User,
+  Message,
+  SosReport,
+  MediaChunk,
+  SyncOutbox,
+  PendingMessage,
+  PeerKey,
+  Conversation,
+  ConversationParticipant,
+  MediaTransfer,
+} from './models';
 
 const adapter = new SQLiteAdapter({
   schema,
@@ -16,7 +27,29 @@ const adapter = new SQLiteAdapter({
 
 export const database = new Database({
   adapter,
-  modelClasses: [User, Message, SosReport, MediaChunk, SyncOutbox, PendingMessage, PeerKey],
+  modelClasses: [
+    User,
+    Message,
+    SosReport,
+    MediaChunk,
+    SyncOutbox,
+    PendingMessage,
+    PeerKey,
+    Conversation,
+    ConversationParticipant,
+    MediaTransfer,
+  ],
 });
 
-export { User, Message, SosReport, MediaChunk, SyncOutbox, PendingMessage, PeerKey };
+export {
+  User,
+  Message,
+  SosReport,
+  MediaChunk,
+  SyncOutbox,
+  PendingMessage,
+  PeerKey,
+  Conversation,
+  ConversationParticipant,
+  MediaTransfer,
+};
