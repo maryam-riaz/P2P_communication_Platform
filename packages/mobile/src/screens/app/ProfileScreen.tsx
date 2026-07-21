@@ -10,11 +10,13 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useSelector, useDispatch } from 'react-redux';
+import { useRouter } from 'expo-router';
 import { RootState } from '../../redux/store';
 import { logout } from '../../redux/slices/authSlice';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 
 export default function ProfileScreen({ navigation }: any) {
+  const router = useRouter();
   const dispatch = useDispatch();
   const { user, role } = useSelector((state: RootState) => state.auth);
 
@@ -124,6 +126,10 @@ export default function ProfileScreen({ navigation }: any) {
           <Text style={styles.infoValue}>20240703</Text>
         </View>
       </View>
+      <TouchableOpacity style={styles.debugButton} onPress={() => router.push('/spike')}>
+        <MaterialCommunityIcons name="radar" size={20} color="#028090" />
+        <Text style={styles.debugButtonText}>Nearby Spike Test</Text>
+      </TouchableOpacity>
       <TouchableOpacity style={styles.logoutButton} onPress={handleLogout}>
         <MaterialCommunityIcons name="logout" size={20} color="#E0005C" />
         <Text style={styles.logoutButtonText}>Logout</Text>
@@ -154,6 +160,8 @@ const styles = StyleSheet.create({
   infoItem: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingHorizontal: 16, paddingVertical: 12 },
   infoLabel: { fontSize: 15, color: '#FFF' },
   infoValue: { fontSize: 14, color: '#999' },
+  debugButton: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8, marginHorizontal: 16, marginVertical: 4, paddingVertical: 12, borderWidth: 1, borderColor: '#028090', borderRadius: 8 },
+  debugButtonText: { color: '#028090', fontSize: 15, fontWeight: '600' },
   logoutButton: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8, marginHorizontal: 16, marginVertical: 20, paddingVertical: 12, borderWidth: 1, borderColor: '#E0005C', borderRadius: 8 },
   logoutButtonText: { color: '#E0005C', fontSize: 15, fontWeight: '600' },
   footer: { textAlign: 'center', color: '#666', fontSize: 11, marginBottom: 12 },

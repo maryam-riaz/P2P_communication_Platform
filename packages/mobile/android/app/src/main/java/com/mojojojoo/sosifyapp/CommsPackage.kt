@@ -15,7 +15,8 @@ class CommsPackage : ReactPackage {
     override fun createNativeModules(reactContext: ReactApplicationContext): List<NativeModule> =
         listOf(
             BleAdvertiserModule(reactContext),
-            WifiDirectModule(reactContext)
+            WifiDirectModule(reactContext),
+            NearbyConnectionsModule(reactContext)
         )
 
     override fun createViewManagers(reactContext: ReactApplicationContext): List<ViewManager<*, *>> =

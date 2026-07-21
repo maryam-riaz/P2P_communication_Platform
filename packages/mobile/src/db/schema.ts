@@ -1,0 +1,74 @@
+import { appSchema, tableSchema } from '@nozbe/watermelondb';
+
+export const schema = appSchema({
+  version: 1,
+  tables: [
+    tableSchema({
+      name: 'users',
+      columns: [
+        { name: 'display_name', type: 'string' },
+        { name: 'role', type: 'string' },
+        { name: 'public_key', type: 'string' },
+        { name: 'public_key_hash', type: 'string' },
+        { name: 'last_seen_at', type: 'number' },
+        { name: 'created_at', type: 'number' },
+        { name: 'updated_at', type: 'number' },
+      ],
+    }),
+    tableSchema({
+      name: 'messages',
+      columns: [
+        { name: 'sender_id', type: 'string' },
+        { name: 'receiver_id', type: 'string', isOptional: true },
+        { name: 'conversation_id', type: 'string' },
+        { name: 'type', type: 'string' },
+        { name: 'payload', type: 'string' },
+        { name: 'nonce', type: 'string', isOptional: true },
+        { name: 'ttl', type: 'number' },
+        { name: 'status', type: 'string' },
+        { name: 'created_at', type: 'number' },
+        { name: 'updated_at', type: 'number' },
+      ],
+    }),
+    tableSchema({
+      name: 'sos_reports',
+      columns: [
+        { name: 'sender_id', type: 'string' },
+        { name: 'title', type: 'string' },
+        { name: 'description', type: 'string' },
+        { name: 'latitude', type: 'number' },
+        { name: 'longitude', type: 'number' },
+        { name: 'severity', type: 'string' },
+        { name: 'status', type: 'string' },
+        { name: 'created_at', type: 'number' },
+        { name: 'updated_at', type: 'number' },
+      ],
+    }),
+    tableSchema({
+      name: 'media_chunks',
+      columns: [
+        { name: 'record_id', type: 'string' },
+        { name: 'record_type', type: 'string' },
+        { name: 'chunk_index', type: 'number' },
+        { name: 'chunk_total', type: 'number' },
+        { name: 'data', type: 'string' },
+        { name: 'nonce', type: 'string', isOptional: true },
+        { name: 'created_at', type: 'number' },
+        { name: 'updated_at', type: 'number' },
+      ],
+    }),
+    tableSchema({
+      name: 'sync_outbox',
+      columns: [
+        { name: 'record_id', type: 'string' },
+        { name: 'record_type', type: 'string' },
+        { name: 'operation', type: 'string' },
+        { name: 'status', type: 'string' },
+        { name: 'retry_count', type: 'number' },
+        { name: 'last_error', type: 'string', isOptional: true },
+        { name: 'created_at', type: 'number' },
+        { name: 'updated_at', type: 'number' },
+      ],
+    }),
+  ],
+});
