@@ -1,7 +1,7 @@
 import { appSchema, tableSchema } from '@nozbe/watermelondb';
 
 export const schema = appSchema({
-  version: 2,
+  version: 3,
   tables: [
     tableSchema({
       name: 'users',
@@ -66,6 +66,18 @@ export const schema = appSchema({
         { name: 'status', type: 'string' },
         { name: 'retry_count', type: 'number' },
         { name: 'last_error', type: 'string', isOptional: true },
+        { name: 'created_at', type: 'number' },
+        { name: 'updated_at', type: 'number' },
+      ],
+    }),
+    tableSchema({
+      name: 'peer_keys',
+      columns: [
+        { name: 'peer_id', type: 'string', isIndexed: true },
+        { name: 'their_public_key', type: 'string' },
+        { name: 'fingerprint_hex', type: 'string' },
+        { name: 'first_seen_at', type: 'number' },
+        { name: 'last_seen_at', type: 'number' },
         { name: 'created_at', type: 'number' },
         { name: 'updated_at', type: 'number' },
       ],

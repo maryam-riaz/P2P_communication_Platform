@@ -4,6 +4,7 @@ import { PER_TYPE_TTL } from '../nearby/types';
 export function createEnvelope(
   type: EnvelopeType,
   senderId: string,
+  senderPublicKey: string,
   senderRoleCert: string,
   ciphertext: string,
   nonce: string,
@@ -21,6 +22,7 @@ export function createEnvelope(
     type,
     sender_id: senderId,
     sender_role_cert: senderRoleCert,
+    sender_public_key: senderPublicKey,
     ttl: opts?.ttl ?? PER_TYPE_TTL[type],
     timestamp: Date.now(),
     chunk_index: opts?.chunkIndex ?? 0,

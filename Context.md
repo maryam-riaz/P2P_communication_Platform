@@ -123,3 +123,124 @@ Two Samsung devices (A33 API 36, A32 API 33) — bidirectional "hello world" exc
 - `packages/mobile/src/p2p/MessageEnvelope.ts` — envelope serialization
 - `packages/mobile/src/db/migrations.ts` — v1→2 schema migration
 - `packages/mobile/src/screens/app/MeshRoutingScreen.tsx` — test UI
+
+---
+
+## Phase 3 — Security Layer (✅ Completed — 3-device relay encryption test pending)
+
+**Goal:** Implement X25519 key exchange, XSalsa20-Poly1305 message encryption, and Ed25519 role credential verification for end-to-end encrypted mesh messaging.
+
+### What changed
+- **`src/crypto/KeyManager.ts`** — X25519 keypair generation via `tweetnacl`, private key persisted to `expo-secure-store`, SHA-512/32 fingerprint for display and QR-ready hex
+- **`src/crypto/MessageCipher.ts`** — `encryptForPeer()` / `decryptFromPeer()` using `nacl.box.before` (X25519 DH) → shared secret → `nacl.secretbox` (XSalsa20-Poly1305); 24-byte random nonce per message
+- **`src/crypto/KeyExchange.ts`** — TOFU (trust-on-first-use) peer key registry; `registerPeerKey()` stores base64 public key + hex fingerprint; `getPublicKey()` / `getFingerprint()` for shared secret derivation
+- **`src/crypto/credentialIssuer.ts`** — `requestCredential()` calls Supabase Edge Function `sign-credential` to get Ed25519-signed role credentials; `verifyCredentialOffline()` verifies against baked-in server public key
+- **`src/p2p/MessageRouter.ts` — encryption integration:**
+  - `sendMessage()` / `sendToPeer()` now accept plaintext, encrypt internally per-peer
+  - `handlePayloadReceived()` decrypts after dedup; relay nodes forward ciphertext without decrypting
+  - `onPeerConnected()` sends public key as `ROLE_CREDENTIAL` envelope (key exchange)
+  - `ROLE_CREDENTIAL` type messages are intercepted before routing — extract & register peer's public key
+- **WatermelonDB changes:** schema version 2→3, new `peer_keys` table + `PeerKey` model + migration
+- **`MeshEnvelope`** — added `sender_public_key` field so recipients can derive shared secret
+- **`SecurityScreen.tsx`** — debug UI showing device fingerprint, known peers with padlock icons, legend
+- **`MeshRoutingScreen.tsx`** — now passes plaintext directly (no manual `btoa`); per-peer padlock icon shows encryption status
+- **`ProfileScreen.tsx`** — added buttons to navigate to MeshRouting screen and Security screen
+- **Supabase Edge Function** — `supabase/functions/sign-credential/index.ts` for Ed25519-based role credential signing
+
+### Dependencies added
+| Package | Version | Purpose |
+|---|---|---|
+| `tweetnacl` | ^1.0.3 | X25519, XSalsa20-Poly1305, Ed25519 signature verification |
+| `tweetnacl-util` | ^0.15.1 | Base64 + UTF-8 encode/decode helpers |
+| `expo-secure-store` | ~14.0.0 | Private key storage in system keystore |
+| `react-native-get-random-values` | latest | Polyfill `global.crypto.getRandomValues()` for TweetNaCl PRNG |
+
+### Files created (8)
+| File | Purpose |
+|---|---|
+| `src/crypto/KeyManager.ts` | Key generation, secure store, fingerprint |
+| `src/crypto/MessageCipher.ts` | Encrypt/decrypt with nacl.secretbox |
+| `src/crypto/KeyExchange.ts` | TOFU exchange, shared secret cache |
+| `src/crypto/credentialIssuer.ts` | Supabase signing + offline verify |
+| `src/crypto/index.ts` | Barrel exports |
+| `src/screens/app/SecurityScreen.tsx` | Key fingerprint + peers security status |
+| `src/db/models/PeerKey.ts` | WatermelonDB model for peer keys |
+| `supabase/functions/sign-credential/index.ts` | Edge Function for credential signing |
+
+### Files modified (13)
+| File | Change |
+|---|---|
+| `package.json` | Added 4 dependencies |
+| `src/nearby/types.ts` | Added `sender_public_key`, `PeerSecurityState` enum |
+| `src/p2p/MessageEnvelope.ts` | `createEnvelope()` accepts `senderPublicKey` param |
+| `src/p2p/MessageRouter.ts` | Full encryption integration, auto key exchange on connect |
+| `src/p2p/index.ts` | Re-exports `keyManager`, `keyExchange` |
+| `src/db/schema.ts` | v3 + `peer_keys` table |
+| `src/db/migrations.ts` | v2→3 migration with `steps` API format |
+| `src/db/models/index.ts` | Export PeerKey |
+| `src/db/index.ts` | Register PeerKey + v3 migration |
+| `src/screens/app/MeshRoutingScreen.tsx` | Plaintext API, padlock per peer |
+| `src/screens/app/ProfileScreen.tsx` | Debug nav buttons |
+| `src/utils/logger.ts` | Added ROUTER, DEDUP, KEYX, CRED, ROUTING, SECURITY tags |
+| `app.config.js`, `.env.example` | Added `CREDENTIAL_PUBLIC_KEY` env var |
+
+### Verification result
+- **2-device key exchange** ✅ — devices exchange X25519 public keys on connect via `ROLE_CREDENTIAL` envelope; confirmed working in Phase 3 test pass
+- **2-device encrypted messaging** ✅ — `sendMessage()` encrypts with per-peer shared key, receiver decrypts successfully; decrypted content visible in Routing Log
+- **Relay forwarding** ⏳ — mathematically guaranteed (wrong shared key → `nacl.secretbox.open` returns null) but not yet physically verified with 3 devices
+- **Role credential verification** ⏳ — code written but untested; requires deployed Supabase Edge Function + `CREDENTIAL_PUBLIC_KEY` env var
+
+### Verification result
+- **2-device key exchange** ✅ — devices exchange X25519 public keys on connect via `ROLE_CREDENTIAL` envelope; confirmed working in Phase 3 test pass
+- **2-device encrypted messaging** ✅ — `sendMessage()` encrypts with per-peer shared key, receiver decrypts successfully; decrypted content visible in Routing Log
+- **Relay forwarding** ⏳ — mathematically guaranteed (wrong shared key → `nacl.secretbox.open` returns null) but not yet physically verified with 3 devices
+- **Role credential verification** ⏳ — code written but untested; requires deployed Supabase Edge Function + `CREDENTIAL_PUBLIC_KEY` env var
+
+### Bugs fixed
+1. **`expo-secure-store` version mismatch** — `57.0.1` (SDK 57) was incompatible with Expo SDK 54; pinned to `14.0.0` which provides `AnyTypeCache` matching bundled `expo-modules-kotlin`
+2. **`no PRNG` crash** — React Native lacks `global.crypto`; added `react-native-get-random-values` polyfill at app root (`app/_layout.tsx` import) so `tweetnacl.randomBytes()` has a source of entropy. Initial fix (`import` in `KeyManager.ts`) didn't work due to Hermes bundler ordering; moved to root entry point resolved it. Requires full `npx expo run:android` build (dev client `a` key) for polyfill to take effect.
+3. **`Collection.create() can only be called from inside of a Writer`** — WatermelonDB write operations (`persistMessage`, `persistPending`, `persistPeerKey`) in `MessageRouter.ts` called `.create()`/`.update()` outside of `database.write()`. Fixed by wrapping all three persist methods in `database.write(async () => { ... })`.
+4. **Keys stored under deviceId but looked up by endpointId** — `handlePayloadReceived()` ROLE_CREDENTIAL handler called `keyExchange.registerPeerKey(env.sender_id, ...)` which stored the key under the logical deviceId (fingerprint). But `sendMessage()` looked up keys via `keyExchange.getPublicKey(peer.endpointId)` using Nearby's endpoint ID (e.g. `"KPPD"`). These never matched, so **every message was sent unencrypted** and decryption always failed — `subscribeDecrypted()` callbacks were never invoked. Fixed by adding `keyExchange.registerPeerKey(event.peerId, ...)` in both the ROLE_CREDENTIAL handler and the successful-decrypt path.
+
+### Post-Phase-3 fixes applied
+| Date | Fix |
+|---|---|
+| 2026-07-21 | `react-native-get-random-values` import moved to `app/_layout.tsx` root entry (Hermes compatibility) |
+| 2026-07-21 | All three `persist*` methods in `MessageRouter.ts` wrapped in `database.write()` for WatermelonDB compliance |
+| 2026-07-21 | Added `subscribeDecrypted()` callback to `MessageRouter` — decrypted messages now surfaced to UI |
+| 2026-07-21 | `MeshRoutingScreen.tsx` subscribes to decrypted events and shows `[DECRYPTED from {senderId}: {text}]` in routing log |
+| 2026-07-21 | Keys registered under BOTH `env.sender_id` (deviceId) AND `event.peerId` (endpointId) — fixes silent unencrypted-send bug |
+
+### What's blocked
+- 3-device relay encryption test — A→B→C: B receives but cannot decrypt (correct), C decrypts (needs third Android device)
+- Role credential end-to-end — Edge Function not yet deployed; `CREDENTIAL_PUBLIC_KEY` not yet configured
+- QR-pairing — deferred to Phase 10; fingerprints stored in hex format convertible to QR without migration
+
+### Encryption architecture
+```
+sendMessage(type, plaintext)
+  → encryptForPeer(plaintext, theirPub, ourSecret)
+    → nacl.box.before(theirPub, ourSecret) → sharedKey
+    → nacl.secretbox(plainBytes, nonce, sharedKey) → ciphertext
+  → createEnvelope(sender_public_key, nonce, ciphertext)
+  → transport.sendPayload(peer, serialized)
+
+onPayloadReceived
+  → deserializeEnvelope
+  → if ROLE_CREDENTIAL → registerPeerKey(sender_id, ciphertext)
+  → decryptFromPeer(ciphertext, nonce, senderPub, ourSecret)
+    → nacl.box.before(senderPub, ourSecret) → sharedKey
+    → nacl.secretbox.open(cipherBytes, nonceBytes, sharedKey) → plaintext | null
+  → null → relay (forward TTL-1, cannot decrypt)
+  → string → process locally
+```
+
+### Relevant paths
+- `packages/mobile/src/crypto/` — all crypto modules (KeyManager, KeyExchange, MessageCipher, credentialIssuer)
+- `packages/mobile/src/nearby/types.ts` — MeshEnvelope with sender_public_key
+- `packages/mobile/src/p2p/MessageRouter.ts` — encryption integration
+- `packages/mobile/src/db/schema.ts` — v3 + peer_keys table
+- `packages/mobile/src/db/migrations.ts` — v2→3 migration
+- `packages/mobile/src/screens/app/SecurityScreen.tsx` — encryption debug UI
+- `packages/mobile/src/screens/app/MeshRoutingScreen.tsx` — routing + encryption test UI
+- `packages/mobile/supabase/functions/sign-credential/index.ts` — Edge Function

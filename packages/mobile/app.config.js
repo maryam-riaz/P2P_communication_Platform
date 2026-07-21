@@ -9,6 +9,7 @@ module.exports = {
     extra: {
       supabaseUrl: process.env.SUPABASE_URL ?? null,
       supabaseAnonKey: process.env.SUPABASE_ANON_KEY ?? null,
+      credentialPublicKey: process.env.CREDENTIAL_PUBLIC_KEY ?? null,
     },
   },
 };

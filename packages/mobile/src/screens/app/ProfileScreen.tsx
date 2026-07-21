@@ -130,6 +130,14 @@ export default function ProfileScreen({ navigation }: any) {
         <MaterialCommunityIcons name="radar" size={20} color="#028090" />
         <Text style={styles.debugButtonText}>Nearby Spike Test</Text>
       </TouchableOpacity>
+      <TouchableOpacity style={styles.debugButton} onPress={() => navigation.navigate('MeshRouting')}>
+        <MaterialCommunityIcons name="router-network" size={20} color="#2ECC71" />
+        <Text style={[styles.debugButtonText, { color: '#2ECC71' }]}>Mesh Routing Test</Text>
+      </TouchableOpacity>
+      <TouchableOpacity style={styles.debugButton} onPress={() => navigation.navigate('Security')}>
+        <MaterialCommunityIcons name="shield-key" size={20} color="#FF8C42" />
+        <Text style={[styles.debugButtonText, { color: '#FF8C42' }]}>Security (Encryption)</Text>
+      </TouchableOpacity>
       <TouchableOpacity style={styles.logoutButton} onPress={handleLogout}>
         <MaterialCommunityIcons name="logout" size={20} color="#E0005C" />
         <Text style={styles.logoutButtonText}>Logout</Text>

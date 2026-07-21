@@ -7,6 +7,8 @@ import ChatScreen from '../screens/app/ChatScreen';
 import AdvisorScreen from '../screens/app/AdvisorScreen';
 import AdvisorFlowScreen from '../screens/app/AdvisorFlowScreen';
 import ProfileScreen from '../screens/app/ProfileScreen';
+import MeshRoutingScreen from '../screens/app/MeshRoutingScreen';
+import SecurityScreen from '../screens/app/SecurityScreen';
 import EmergencyFormScreen from '../screens/app/EmergencyFormScreen';
 import ChatListScreen from '../screens/app/ChatListScreen';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
@@ -85,6 +87,20 @@ function AdvisorStack() {
           headerShown: false,
         }}
       />
+    </Stack.Navigator>
+  );
+}
+
+function ProfileStack() {
+  return (
+    <Stack.Navigator
+      screenOptions={{
+        headerShown: false,
+      }}
+    >
+      <Stack.Screen name="ProfileScreen" component={ProfileScreen} />
+      <Stack.Screen name="MeshRouting" component={MeshRoutingScreen} />
+      <Stack.Screen name="Security" component={SecurityScreen} />
     </Stack.Navigator>
   );
 }
@@ -168,7 +184,7 @@ export default function AppStack() {
         />
         <Tab.Screen
           name="Profile"
-          component={ProfileScreen}
+          component={ProfileStack}
           options={{
             tabBarLabel: 'Profile',
             tabBarIcon: ({ color, size }) => (

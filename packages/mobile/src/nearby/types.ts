@@ -105,6 +105,7 @@ export interface MeshEnvelope {
   type: EnvelopeType;
   sender_id: string;
   sender_role_cert: string;
+  sender_public_key: string;
   ttl: number;
   timestamp: number;
   chunk_index: number;
@@ -113,6 +114,13 @@ export interface MeshEnvelope {
   ciphertext: string;
   auth_tag: string;
   route_history: string[];
+}
+
+export enum PeerSecurityState {
+  Unknown = 'unknown',
+  Trusted = 'trusted',
+  Mismatch = 'mismatch',
+  Pending = 'pending',
 }
 
 export interface PendingOutboxEntry {

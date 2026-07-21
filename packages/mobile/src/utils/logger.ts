@@ -3,6 +3,12 @@ const TAG = {
   NATIVE: '[NearbyConnections] ',
   SCREEN: '[SpikeScreen]      ',
   PERMS: '[Permissions]      ',
+  ROUTER: '[MessageRouter]    ',
+  DEDUP: '[DedupCache]       ',
+  KEYX: '[KeyExchange]      ',
+  CRED: '[Credentials]      ',
+  ROUTING: '[RoutingScreen]    ',
+  SECURITY: '[SecurityScreen]   ',
 } as const;
 
 type TagKey = keyof typeof TAG;

@@ -11,9 +11,9 @@ import {
   Alert,
 } from 'react-native';
 import { meshTransport } from '../../nearby';
-import { PeerState } from '../../nearby/types';
+import { PeerState, PeerSecurityState } from '../../nearby/types';
 import type { PeerInfo, EnvelopeType } from '../../nearby/types';
-import { messageRouter } from '../../p2p';
+import { messageRouter, keyExchange } from '../../p2p';
 import { logm, errm } from '../../utils/logger';
 
 const SCREEN = 'ROUTING';
@@ -33,6 +33,15 @@ function stateColor(state: PeerState): string {
     case PeerState.Disconnecting: return '#FF8C42';
     case PeerState.Disconnected: return '#E0005C';
     case PeerState.Reconnecting: return '#FFA500';
+  }
+}
+
+function secStateLabel(state: PeerSecurityState): string {
+  switch (state) {
+    case PeerSecurityState.Trusted: return '🔒';
+    case PeerSecurityState.Pending: return '🔐';
+    case PeerSecurityState.Mismatch: return '⚠️';
+    case PeerSecurityState.Unknown: return '🔓';
   }
 }
 
@@ -119,6 +128,13 @@ export default function MeshRoutingScreen() {
       updatePeers();
     });
 
+    const unsubDecrypted = messageRouter.subscribeDecrypted((senderId, plaintext) => {
+      addLog(
+        `DECRYPTED from ${senderId}: ${plaintext.substring(0, 60)}${plaintext.length > 60 ? '...' : ''}`,
+        '#00BFFF',
+      );
+    });
+
     statusInterval.current = setInterval(() => updateStatus(), 3000);
 
     return () => {
@@ -129,6 +145,7 @@ export default function MeshRoutingScreen() {
       unsubDisconnected();
       unsubData();
       unsubReconnecting();
+      unsubDecrypted();
       if (statusInterval.current) clearInterval(statusInterval.current);
     };
   }, [addLog, updatePeers, updateStatus, deviceId]);
@@ -183,10 +200,8 @@ export default function MeshRoutingScreen() {
       return;
     }
     try {
-      const payload = btoa(messageText);
-      const nonce = btoa('000000000000000000000000');
-      const authTag = btoa('placeholder_auth');
-      const env = await messageRouter.sendMessage(messageType, payload, nonce, authTag);
+      const envs = await messageRouter.sendMessage(messageType, messageText);
+      const env = envs[0];
       addLog(
         `SENT [${messageType}] ${env.message_id.substring(0, 8)}... ` +
         `(ttl=${env.ttl}) ` +
@@ -205,10 +220,7 @@ export default function MeshRoutingScreen() {
       return;
     }
     try {
-      const payload = btoa(messageText);
-      const nonce = btoa('000000000000000000000000');
-      const authTag = btoa('placeholder_auth');
-      const env = await messageRouter.sendToPeer(endpointId, messageType, payload, nonce, authTag);
+      const env = await messageRouter.sendToPeer(endpointId, messageType, messageText);
       addLog(`SENT [${messageType}] ${env.message_id.substring(0, 8)}... → direct to ${endpointId}`, '#2ECC71');
     } catch (e: any) {
       showError('Send To Peer Failed', e?.message || String(e));
@@ -228,11 +240,15 @@ export default function MeshRoutingScreen() {
     }
   };
 
-  const renderPeer = ({ item }: { item: PeerInfo }) => (
+  const renderPeer = ({ item }: { item: PeerInfo }) => {
+    const secState = keyExchange.hasPeerKey(item.endpointId)
+      ? PeerSecurityState.Trusted
+      : PeerSecurityState.Unknown;
+    return (
     <View style={styles.peerRow}>
       <View style={styles.peerInfo}>
         <Text style={styles.peerName} numberOfLines={1}>
-          {item.displayName || item.endpointId}
+          {secStateLabel(secState)} {item.displayName || item.endpointId}
         </Text>
         <Text style={[styles.peerStateLabel, { color: stateColor(item.state) }]}>
           {stateLabel(item.state)}
@@ -265,7 +281,8 @@ export default function MeshRoutingScreen() {
         )}
       </View>
     </View>
-  );
+    );
+  };
 
   return (
     <View style={styles.container}>
