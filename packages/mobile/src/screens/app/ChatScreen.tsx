@@ -12,7 +12,6 @@ import {
   Modal,
   Linking,
   Alert,
-  NativeModules,
   KeyboardAvoidingView,
   Keyboard,
 } from 'react-native';
@@ -23,9 +22,6 @@ import * as DocumentPicker from 'expo-document-picker';
 import * as ImagePicker from 'expo-image-picker';
 import { Audio, Video, ResizeMode } from 'expo-av';
 import { Image } from 'expo-image';
-import { useService } from '../../hooks/useService';
-import { ChatService } from '../../services/ChatService';
-import { Message } from '../../db/models';
 
 interface Attachment {
   uri: string;
@@ -33,46 +29,24 @@ interface Attachment {
   name: string;
 }
 
-/** Map a WatermelonDB Message _raw to the display shape used by this screen. */
 interface DisplayMessage {
   id: string;
-  senderId: string;
+  senderId: 'user' | 'other';
   text: string;
   timestamp: string;
   status: string;
   attachment?: Attachment;
 }
 
-function toDisplayMessage(msg: Message, localDeviceId: string): DisplayMessage {
-  const raw = msg._raw as any;
-  let text = raw.ciphertext || '';
-  let attachment: Attachment | undefined = undefined;
+const MOCK_INITIAL_MESSAGES: DisplayMessage[] = [
+  { id: 'm1', senderId: 'other', text: 'Hello! I saw your signal. Are you okay?', timestamp: '10:32 AM', status: 'read', attachment: undefined },
+  { id: 'm2', senderId: 'user', text: 'Yes, but I need medical supplies urgently.', timestamp: '10:33 AM', status: 'read', attachment: undefined },
+  { id: 'm3', senderId: 'other', text: 'Stay where you are. Help is on the way.', timestamp: '10:34 AM', status: 'read', attachment: undefined },
+];
 
-  if (text.startsWith('{') && text.endsWith('}')) {
-    try {
-      const parsed = JSON.parse(text);
-      text = parsed.text || '';
-      attachment = parsed.attachment;
-    } catch (e) {
-      // Treat as plain text fallback
-    }
-  }
-
-  return {
-    id: msg.id,
-    senderId: raw.sender_id === localDeviceId ? 'user' : 'other',
-    text,
-    timestamp: new Date(raw.created_at).toLocaleTimeString([], {
-      hour: '2-digit',
-      minute: '2-digit',
-    }),
-    status: raw.sync_status || 'pending',
-    attachment,
-  };
-}
+let msgCounter = 3;
 
 export default function ChatScreen({ route, navigation }: any) {
-  const chatService = useService(ChatService);
   const insets = useSafeAreaInsets();
 
   const [isKeyboardOpen, setIsKeyboardOpen] = useState(false);
@@ -86,7 +60,6 @@ export default function ChatScreen({ route, navigation }: any) {
       Platform.OS === 'ios' ? 'keyboardWillHide' : 'keyboardDidHide',
       () => setIsKeyboardOpen(false)
     );
-
     return () => {
       showSubscription.remove();
       hideSubscription.remove();
@@ -99,50 +72,15 @@ export default function ChatScreen({ route, navigation }: any) {
   const recipientId: string = person.id || route?.params?.recipientId || '';
   const recipientName: string = person.name || route?.params?.recipientName || 'Chat';
 
-  const [messages, setMessages] = useState<DisplayMessage[]>([]);
+  const [messages, setMessages] = useState<DisplayMessage[]>(MOCK_INITIAL_MESSAGES);
   const [inputText, setInputText] = useState('');
   const [isSending, setIsSending] = useState(false);
   const [isPicking, setIsPicking] = useState(false);
-  const [transferProgress, setTransferProgress] = useState<{ [msgId: string]: number }>({});
-  const [localDeviceId, setLocalDeviceId] = useState('');
-  const [isPeerActive, setIsPeerActive] = useState(false);
-  const [displayName, setDisplayName] = useState(recipientName);
+  const [transferProgress] = useState<{ [msgId: string]: number }>({});
+  const [isPeerActive] = useState(true);
+  const [displayName] = useState(recipientName);
   const flatListRef = useRef<FlatList>(null);
 
-  // Subscribe to transfer progress updates
-  useEffect(() => {
-    const sub = chatService.observeTransferProgress().subscribe({
-      next: (progressMap) => {
-        console.log('[ChatScreen] Received transferProgressMap update:', JSON.stringify(progressMap));
-        setTransferProgress(progressMap);
-      },
-    });
-    return () => sub.unsubscribe();
-  }, [chatService]);
-
-  // Fetch true peer display name if cached/different
-  useEffect(() => {
-    if (!recipientId) return;
-    chatService['repository']?.getPeer(recipientId).then((peer: any) => {
-      if (peer && peer.displayName) {
-        setDisplayName(peer.displayName);
-      }
-    }).catch(() => { });
-  }, [recipientId, chatService]);
-
-  // Subscribe to active connection status for this peer
-  useEffect(() => {
-    if (!recipientId) return;
-    const subscription = chatService.observeActiveTransportIds().subscribe({
-      next: (activeIds) => {
-        setIsPeerActive(activeIds.includes(recipientId));
-      },
-      error: (err) => console.error('[ChatScreen] active status check error', err),
-    });
-    return () => subscription.unsubscribe();
-  }, [recipientId, chatService]);
-
-  // Native Audio Playback/Recording state
   const [playingAudioId, setPlayingAudioId] = useState<string | null>(null);
   const [audioProgress, setAudioProgress] = useState(0);
   const soundRef = useRef<Audio.Sound | null>(null);
@@ -152,59 +90,17 @@ export default function ChatScreen({ route, navigation }: any) {
   const recordingRef = useRef<Audio.Recording | null>(null);
   const recordingInterval = useRef<any>(null);
 
-  // Clean up audio resources on unmount
   useEffect(() => {
     return () => {
-      if (soundRef.current) {
-        soundRef.current.unloadAsync().catch(() => { });
-      }
-      if (recordingRef.current) {
-        recordingRef.current.stopAndUnloadAsync().catch(() => { });
-      }
+      if (soundRef.current) { soundRef.current.unloadAsync().catch(() => {}); }
+      if (recordingRef.current) { recordingRef.current.stopAndUnloadAsync().catch(() => {}); }
       clearInterval(recordingInterval.current);
     };
   }, []);
 
-  // Full Screen Image Preview modal
   const [previewImage, setPreviewImage] = useState<string | null>(null);
-  // Full Screen Video Preview modal
   const [previewVideo, setPreviewVideo] = useState<string | null>(null);
 
-  // Resolve local device ID once for message side detection
-  useEffect(() => {
-    chatService['repository']?.getLocalUser().then((u: any) => {
-      if (u) setLocalDeviceId(u._raw?.device_id || '');
-    }).catch(() => { });
-  }, [chatService]);
-
-  // Subscribe to live messages for this conversation
-  useEffect(() => {
-    if (!recipientId || !localDeviceId) return;
-
-    const subscription = chatService
-      .observeMessagesByRecipient(recipientId, localDeviceId)
-      .subscribe({
-        next: (dbMessages) => {
-          const displayed = dbMessages.slice().reverse().map((m) => toDisplayMessage(m, localDeviceId));
-          setMessages(displayed);
-          // Scroll to bottom on new messages
-          setTimeout(() => flatListRef.current?.scrollToEnd({ animated: true }), 100);
-        },
-        error: (err) => console.error('[ChatScreen] message stream error', err),
-      });
-
-    return () => subscription.unsubscribe();
-  }, [recipientId, chatService, localDeviceId]);
-
-  // Mark messages as read when screen is focused
-  useFocusEffect(
-    useCallback(() => {
-      if (recipientId) {
-        chatService.markAsRead(recipientId).catch(() => { });
-      }
-    }, [recipientId, chatService])
-  );
-  // Hide bottom tab bar while this screen is focused
   useFocusEffect(
     useCallback(() => {
       const parent = navigation.getParent();
@@ -213,93 +109,57 @@ export default function ChatScreen({ route, navigation }: any) {
     }, [navigation])
   );
 
-  const checkWifiBeforeSend = async (): Promise<boolean> => {
-    if (Platform.OS === 'android') {
-      try {
-        if (NativeModules.WifiDirect && typeof NativeModules.WifiDirect.isWifiEnabled === 'function') {
-          const wifiEnabled = await NativeModules.WifiDirect.isWifiEnabled();
-          if (!wifiEnabled) {
-            Alert.alert(
-              'Wi-Fi Required',
-              'Wi-Fi is turned off. Please turn it on to send messages offline.',
-              [
-                { text: 'Cancel', style: 'cancel' },
-                {
-                  text: 'Turn On', onPress: () => {
-                    if (NativeModules.WifiDirect && typeof NativeModules.WifiDirect.setWifiEnabled === 'function') {
-                      NativeModules.WifiDirect.setWifiEnabled(true).catch(console.error);
-                    }
-                  }
-                }
-              ]
-            );
-            return false;
-          }
-        }
-      } catch (err) {
-        console.warn('Failed to check Wi-Fi state:', err);
-      }
-    }
-    return true;
-  };
-
-  const handleSendMessage = async () => {
+  const handleSendMessage = () => {
     if (!inputText.trim() || !recipientId || isSending) return;
-
-    const isWifiOk = await checkWifiBeforeSend();
-    if (!isWifiOk) return;
-
     const text = inputText.trim();
     setInputText('');
     setIsSending(true);
-
-    try {
-      await chatService.sendMessage(text, recipientId);
-    } catch (err) {
-      console.error('[ChatScreen] send failed', err);
-    } finally {
-      setIsSending(false);
-    }
+    msgCounter++;
+    const newMsg: DisplayMessage = {
+      id: `m${msgCounter}`,
+      senderId: 'user',
+      text,
+      timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+      status: 'sent',
+    };
+    setMessages((prev) => [...prev, newMsg]);
+    setTimeout(() => {
+      setMessages((prev) =>
+        prev.map((m) => (m.id === newMsg.id ? { ...m, status: 'delivered' } : m))
+      );
+    }, 1000);
+    setTimeout(() => flatListRef.current?.scrollToEnd({ animated: true }), 100);
+    setIsSending(false);
   };
 
   const handlePickAttachment = async () => {
     if (isPicking || isSending) return;
-    const isWifiOk = await checkWifiBeforeSend();
-    if (!isWifiOk) return;
     setIsPicking(true);
-
     try {
-      const result = await DocumentPicker.getDocumentAsync({
-        type: '*/*',
-        copyToCacheDirectory: true,
-      });
-
+      const result = await DocumentPicker.getDocumentAsync({ type: '*/*', copyToCacheDirectory: true });
       if (result.canceled || !result.assets || result.assets.length === 0) {
         setIsPicking(false);
         return;
       }
-
       const asset = result.assets[0];
       let type: 'image' | 'video' | 'audio' = 'image';
       const mime = asset.mimeType || '';
       const nameLower = asset.name.toLowerCase();
-
-      if (mime.startsWith('image/') || nameLower.match(/\.(jpg|jpeg|png|gif|webp)$/)) {
-        type = 'image';
-      } else if (mime.startsWith('video/') || nameLower.match(/\.(mp4|mov|m4v|3gp|avi|mkv)$/)) {
-        type = 'video';
-      } else if (mime.startsWith('audio/') || nameLower.match(/\.(mp3|wav|m4a|aac|ogg|flac)$/)) {
-        type = 'audio';
-      }
-
+      if (mime.startsWith('image/') || nameLower.match(/\.(jpg|jpeg|png|gif|webp)$/)) type = 'image';
+      else if (mime.startsWith('video/') || nameLower.match(/\.(mp4|mov|m4v|3gp|avi|mkv)$/)) type = 'video';
+      else if (mime.startsWith('audio/') || nameLower.match(/\.(mp3|wav|m4a|aac|ogg|flac)$/)) type = 'audio';
       setIsSending(true);
-
-      await chatService.sendMessage('', recipientId, {
-        uri: asset.uri,
-        type,
-        name: asset.name || `doc-${Date.now()}`,
-      });
-
+      msgCounter++;
+      const newMsg: DisplayMessage = {
+        id: `m${msgCounter}`,
+        senderId: 'user',
+        text: '',
+        timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+        status: 'sent',
+        attachment: { uri: asset.uri, type, name: asset.name || `doc-${Date.now()}` },
+      };
+      setMessages((prev) => [...prev, newMsg]);
+      setTimeout(() => flatListRef.current?.scrollToEnd({ animated: true }), 100);
     } catch (err) {
       console.error('[ChatScreen] Attachment processing failed:', err);
     } finally {
@@ -332,65 +192,51 @@ export default function ChatScreen({ route, navigation }: any) {
   };
 
   const launchCameraWithOptions = async (mode: 'image' | 'video') => {
-    const isWifiOk = await checkWifiBeforeSend();
-    if (!isWifiOk) return;
-
     try {
       const cameraPermission = await ImagePicker.requestCameraPermissionsAsync();
       if (cameraPermission.status !== 'granted') {
-        Alert.alert(
-          'Permission Denied',
-          'Camera permission is required to capture media.',
-          [
-            { text: 'Cancel', style: 'cancel' },
-            { text: 'Settings', onPress: () => Linking.openSettings() }
-          ]
-        );
+        Alert.alert('Permission Denied', 'Camera permission is required to capture media.', [
+          { text: 'Cancel', style: 'cancel' },
+          { text: 'Settings', onPress: () => Linking.openSettings() }
+        ]);
         return;
       }
-
       if (mode === 'video') {
         const microPermission = await Audio.requestPermissionsAsync();
         if (microPermission.status !== 'granted') {
-          Alert.alert(
-            'Permission Denied',
-            'Microphone permission is required to record videos.',
-            [
-              { text: 'Cancel', style: 'cancel' },
-              { text: 'Settings', onPress: () => Linking.openSettings() }
-            ]
-          );
+          Alert.alert('Permission Denied', 'Microphone permission is required to record videos.', [
+            { text: 'Cancel', style: 'cancel' },
+            { text: 'Settings', onPress: () => Linking.openSettings() }
+          ]);
           return;
         }
       }
-
       setIsPicking(true);
-
       const result = await ImagePicker.launchCameraAsync({
         mediaTypes: mode === 'video' ? ['videos'] : ['images'],
-        quality: 0.4, // Compress image to prevent Out-of-Memory (OOM) crashes
-        videoMaxDuration: 15, // Limit video recording to 15 seconds to prevent OOM
+        quality: 0.4,
+        videoMaxDuration: 15,
       });
-
       if (result.canceled || !result.assets || result.assets.length === 0) {
         setIsPicking(false);
         return;
       }
-
       const asset = result.assets[0];
       const type = asset.type === 'video' ? 'video' : 'image';
-
       setIsSending(true);
-
       const extension = type === 'video' ? 'mp4' : 'jpg';
       const name = asset.fileName || `camera-${Date.now()}.${extension}`;
-
-      await chatService.sendMessage('', recipientId, {
-        uri: asset.uri,
-        type,
-        name,
-      });
-
+      msgCounter++;
+      const newMsg: DisplayMessage = {
+        id: `m${msgCounter}`,
+        senderId: 'user',
+        text: '',
+        timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+        status: 'sent',
+        attachment: { uri: asset.uri, type, name },
+      };
+      setMessages((prev) => [...prev, newMsg]);
+      setTimeout(() => flatListRef.current?.scrollToEnd({ animated: true }), 100);
     } catch (err) {
       console.error('[ChatScreen] Camera capture processing failed:', err);
     } finally {
@@ -430,39 +276,28 @@ export default function ChatScreen({ route, navigation }: any) {
 
   const stopAndSendRecording = async () => {
     if (!recordingRef.current) return;
-
-    const isWifiOk = await checkWifiBeforeSend();
-    if (!isWifiOk) {
-      clearInterval(recordingInterval.current);
-      try {
-        await recordingRef.current.stopAndUnloadAsync();
-      } catch { }
-      recordingRef.current = null;
-      setIsRecording(false);
-      setRecordingDuration(0);
-      return;
-    }
-
     clearInterval(recordingInterval.current);
     const recording = recordingRef.current;
     recordingRef.current = null;
     setIsRecording(false);
     setRecordingDuration(0);
-
     try {
-      console.log('[Audio Recorder] Stopping recording...');
       await recording.stopAndUnloadAsync();
       const uri = recording.getURI();
       if (!uri) return;
-
       setIsSending(true);
-
       const fileName = `voice-note-${Date.now()}.m4a`;
-      await chatService.sendMessage('', recipientId, {
-        uri,
-        type: 'audio',
-        name: fileName,
-      });
+      msgCounter++;
+      const newMsg: DisplayMessage = {
+        id: `m${msgCounter}`,
+        senderId: 'user',
+        text: '',
+        timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+        status: 'sent',
+        attachment: { uri, type: 'audio', name: fileName },
+      };
+      setMessages((prev) => [...prev, newMsg]);
+      setTimeout(() => flatListRef.current?.scrollToEnd({ animated: true }), 100);
     } catch (err) {
       console.error('[Audio Recorder] Stop and send failed:', err);
     } finally {
@@ -509,7 +344,6 @@ export default function ChatScreen({ route, navigation }: any) {
         await Audio.setAudioModeAsync({
           allowsRecordingIOS: false,
           playsInSilentModeIOS: true,
-          shouldRouteAudioToSpeakerIfMounted: true,
         });
         const { sound } = await Audio.Sound.createAsync(
           { uri: audioUri },

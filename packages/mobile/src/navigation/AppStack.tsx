@@ -1,5 +1,5 @@
 import React from 'react';
-import { View, Alert, Linking } from 'react-native';
+import { View } from 'react-native';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import MapScreen from '../screens/app/MapScreen';
@@ -10,7 +10,6 @@ import ProfileScreen from '../screens/app/ProfileScreen';
 import EmergencyFormScreen from '../screens/app/EmergencyFormScreen';
 import ChatListScreen from '../screens/app/ChatListScreen';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
-import * as Location from 'expo-location';
 
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
@@ -123,25 +122,7 @@ export default function AppStack() {
               <MaterialCommunityIcons name="home" size={size} color={color} />
             ),
           }}
-          listeners={({ navigation }) => ({
-            tabPress: async (e) => {
-              try {
-                const locationEnabled = await Location.hasServicesEnabledAsync();
-                if (!locationEnabled) {
-                  Alert.alert(
-                    'Location Required',
-                    'Location services are off. Please enable location to use home map features.',
-                    [
-                      { text: 'Cancel', style: 'cancel' },
-                      { text: 'Turn On', onPress: () => Linking.openSettings() }
-                    ]
-                  );
-                }
-              } catch (err) {
-                console.warn('Failed to check location status on Home press:', err);
-              }
-            },
-          })}
+          listeners={() => ({})}
         />
         <Tab.Screen
           name="Messages"

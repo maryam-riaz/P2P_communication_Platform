@@ -1,4 +1,4 @@
-import React, { useState, useContext } from 'react';
+import React, { useState } from 'react';
 import {
   View,
   Text,
@@ -12,17 +12,12 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { useDispatch } from 'react-redux';
 import { login } from '../../redux/slices/authSlice';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
-import { useService } from '../../hooks/useService';
-import { AuthService } from '../../services/AuthService';
-import { ServiceContext } from '../../context/ServiceContext';
 
 export default function ResponderLoginScreen({ navigation }: any) {
   const [name, setName] = useState('');
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
   const dispatch = useDispatch();
-  const authService = useService(AuthService);
-  const services = useContext(ServiceContext);
 
   const handleLogin = async () => {
     if (!name.trim()) {
@@ -33,21 +28,8 @@ export default function ResponderLoginScreen({ navigation }: any) {
       Alert.alert('Error', 'Password must be at least 6 characters');
       return;
     }
-
-    try {
-      // Create local user profile, ECDH keys, and secure private key
-      const localUser = await authService.login('responder', name.trim());
-      
-      // Bootstrap discovery advertiser, scanner, and socket streams
-      await services.initTransportsForUser(localUser);
-
-      // Dispatch login to Redux to switch Navigation stacks
-      dispatch(login({ name: name.trim(), role: 'responder' }));
-    } catch (error: any) {
-      Alert.alert('Error', error.message || 'Failed to save login credentials');
-    }
+    dispatch(login({ name: name.trim(), role: 'responder' }));
   };
-
 
   return (
     <SafeAreaView style={styles.container}>
