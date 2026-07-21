@@ -60,6 +60,9 @@ ios/build/
 .env.test.local
 .env.production.local
 
+# adb logcat capture outputs
+packages/mobile/logs/
+
 # Root-level debug artifacts from development
 *.txt
 *.png

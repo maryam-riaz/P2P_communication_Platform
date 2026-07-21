@@ -1,8 +1,15 @@
+export { meshTransport } from './MeshTransport';
 export { nearbyConnections, requestNearbyPermissions } from './NearbyConnections';
+export { PeerState, SERVICE_ID_DEFAULT } from './types';
 export type {
-  EndpointFoundEvent,
-  ConnectionInitiatedEvent,
+  PeerInfo,
+  PeerFoundEvent,
+  PeerLostEvent,
+  PeerConnectedEvent,
+  PeerDisconnectedEvent,
   PayloadReceivedEvent,
-  EndpointEvent,
-  EndpointDisconnectedEvent,
-} from './NearbyConnections';
+  PayloadProgressEvent,
+  ReconnectingEvent,
+  AdvertiseOptions,
+  ITransport,
+} from './types';

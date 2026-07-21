@@ -23,7 +23,7 @@ class MainApplication : Application(), ReactApplication {
       object : DefaultReactNativeHost(this) {
         override fun getPackages(): List<ReactPackage> =
             PackageList(this).packages.apply {
-              // Native comms modules: BLE peripheral advertising + Wi-Fi Direct P2P
+              // Native P2P transport: Nearby Connections (Android) / Multipeer Connectivity (iOS)
               add(CommsPackage())
             }
 
