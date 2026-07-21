@@ -534,14 +534,154 @@ adb -s <device> logcat -s ReactNativeJS:V -d > logs/debug.log
 
 Both devices advertise, discover, connect, send, and receive bidirectionally. No crashes, no permission errors, no unhandled exceptions.
 
-### Phase 2 — Multi-Hop Routing Layer (3–4 weeks)
-- Implement the envelope format (Section 3.2) on top of the Phase 1 transport.
-- Implement flood/epidemic routing: TTL decrement, `message_id` dedup cache, loop avoidance.
-- Implement store-and-carry-forward: a device holds messages it can't yet deliver/relay further and re-attempts on next peer contact.
-- Test with 3+ physical devices in a chain (A cannot reach C directly, only via B) to prove multi-hop actually works — this is the feature that differentiates the app.
-- Deliverable: a message sent from Device A reaches Device C via Device B relay, with no direct A↔C connection.
 
-### Phase 3 — Security Layer (2–3 weeks)
+### Phase 2 — Multi-Hop Routing Layer ✅ (Completed — 3-device chain test pending)
+
+> **Duration:** ~1 week (implementation); multi-hop verification deferred — no third device available
+> **Devices used:** Samsung Galaxy A33, Samsung Galaxy A32 (2-device connectivity regression pass only)
+> **Deliverable status:** Code complete, APK builds. Envelope format, flood routing (TTL + dedup + loop avoidance), and store-carry-forward outbox all implemented. Multi-hop relay chain (A→B→C) **not yet verified on 3+ devices**.
+
+---
+
+#### 2.1 — TypeScript Envelope Types
+
+**File edited:** `src/nearby/types.ts`
+
+Added to the existing transport types:
+
+| Export | Description |
+|---|---|
+| `EnvelopeType` union | `TEXT | IMAGE | VIDEO_CHUNK | AUDIO | SOS | ROLE_CREDENTIAL | CHATBOT` |
+| `MeshEnvelope` interface | Full wire format: `message_id`, `type`, `sender_id`, `sender_role_cert`, `ttl`, `timestamp`, `chunk_index`, `chunk_total`, `nonce`, `ciphertext`, `auth_tag`, `route_history` |
+| `PendingOutboxEntry` | Store-carry-forward queue entry shape |
+| `PER_TYPE_TTL` map | TEXT:5, IMAGE:4, VIDEO_CHUNK:3, AUDIO:4, SOS:7, ROLE_CREDENTIAL:2, CHATBOT:3 |
+| `DEDUP_CACHE_MAX` / `DEDUP_CACHE_TTL_MS` | 1000 entries / 5 minutes |
+
+---
+
+#### 2.2 — Envelope Serialization (`src/p2p/MessageEnvelope.ts`)
+
+| Function | Description |
+|---|---|
+| `createEnvelope(...)` | Builds `MeshEnvelope` with UUID, TTL from `PER_TYPE_TTL`, default chunk values |
+| `serializeEnvelope(env)` | `JSON.stringify` → `btoa` (base64 for transport) |
+| `deserializeEnvelope(data)` | `atob` → `JSON.parse` → `MeshEnvelope | null` with validation |
+
+---
+
+#### 2.3 — Dedup Cache (`src/p2p/DedupCache.ts`)
+
+| Feature | Detail |
+|---|---|
+| Storage | `Set<string>` backed by ordered FIFO entry list |
+| Max size | 1000 entries |
+| TTL sweep | Background sweep every 60s for entries > 5 min old |
+| Eviction | Oldest entry shifted when cache is full |
+| Methods | `has(id)`, `add(id)`, `clear()`, `destroy()`, `size()` |
+
+---
+
+#### 2.4 — Message Router (`src/p2p/MessageRouter.ts`)
+
+Core routing singleton wrapping `meshTransport`. Wires event handlers in constructor.
+
+**`sendMessage(type, ciphertext, nonce, authTag, opts?)`:**
+1. Build envelope via `createEnvelope()` (UUID, TTL from type, empty `route_history`)
+2. Serialize to base64
+3. Persist to WatermelonDB `messages` table (`pending`)
+4. Persist to `pending_messages` table (store-carry-forward)
+5. Attempt `transport.broadcast()` — if no peers, silently queued
+
+**`sendToPeer(endpointId, ...)`:** Same flow but unicast via `transport.sendPayload()`.
+
+**`onPayloadReceived` handler (flood routing):**
+1. Deserialize → `MeshEnvelope`
+2. **Dedup check:** `message_id` in cache? → discard
+3. **Loop avoidance:** `deviceId` in `route_history`? → discard
+4. Persist to `messages` (`received`)
+5. `ttl <= 0`? → stop
+6. Decrement TTL, append self to `route_history`
+7. Persist to `pending_messages` (future relay)
+8. Re-serialize → `transport.broadcast()` (flood)
+
+**`onPeerConnected` handler (store-carry-forward):**
+1. Query `pending_messages` where `status=pending` AND `expires_at > now`
+2. Send each to newly connected peer via `transport.sendPayload()`
+3. Delete on success; evict expired entries
+
+---
+
+#### 2.5 — WatermelonDB Changes
+
+**Schema version 1 → 2.** New table `pending_messages`:
+
+| Column | Type | Purpose |
+|---|---|---|
+| `message_id` | string | UUID from envelope |
+| `envelope_json` | string | Full serialized envelope |
+| `type` | string | Envelope type |
+| `target_peer_id` | string (optional) | Flush only to this peer |
+| `ttl_at_queue` | number | TTL at queue time |
+| `expires_at` | number | Eviction timestamp |
+| `status` | string | `pending` / `synced` |
+| `created_at` / `updated_at` | number | Timestamps |
+
+**New model:** `PendingMessage.ts` — standard WatermelonDB decorator pattern.
+**Migration:** `src/db/migrations.ts` — `schemaMigrations` with `createTable` step.
+
+---
+
+#### 2.6 — Test UI
+
+**File created:** `src/screens/app/MeshRoutingScreen.tsx`
+
+| Feature | Detail |
+|---|---|
+| Peer list | Full peer list with CONNECT / DISCONNECT / SEND TO buttons |
+| Type picker | Chip row: TEXT, IMAGE, VIDEO_CHUNK, AUDIO, SOS, CHATBOT |
+| Message input | TextInput + BROADCAST → `messageRouter.sendMessage()` |
+| Routing log | Scrollable with envelope IDs, types, TTL, relay events |
+| Status bar | Peer count, connected count, dedup cache size |
+| Error handling | `Alert.alert()` on any error |
+
+---
+
+#### 2.7 — Files Changed
+
+| File | Action |
+|---|---|
+| `src/nearby/types.ts` | EDITED — envelope + routing types |
+| `src/p2p/MessageEnvelope.ts` | CREATED |
+| `src/p2p/DedupCache.ts` | CREATED |
+| `src/p2p/MessageRouter.ts` | CREATED |
+| `src/p2p/index.ts` | CREATED — exports `messageRouter` singleton |
+| `src/db/schema.ts` | EDITED — version 2, +pending_messages |
+| `src/db/migrations.ts` | CREATED — v1 to 2 migration |
+| `src/db/models/PendingMessage.ts` | CREATED |
+| `src/db/models/index.ts` | EDITED — export PendingMessage |
+| `src/db/index.ts` | EDITED — register PendingMessage + migrations |
+| `src/screens/app/MeshRoutingScreen.tsx` | CREATED |
+
+---
+
+#### Verification Results
+
+```
+[2-device regression pass]  OK
+- A33 A32 bidirectional "hello world" — no regressions from Phase 1
+- APK builds successfully (assembleDebug)
+
+[3-device multi-hop chain]  PENDING
+- Needs a third physical device
+- Procedure: A advertises, B discovers+connects to A, C advertises, B discovers+connects to C.
+  A sends message, B relays (dedup, TTL-1, re-broadcast), C receives without A-C connection.
+```
+
+> **Note:** Multi-hop routing (A to B to C relay) is implemented but not yet tested on 3+ devices.
+> The 2-device bidirectional pass confirms no regressions in the underlying transport.
+> Full multi-hop verification requires a third Android device.
+
+### Phase 3 — Security Layer (Not started)
 - Implement X25519 key exchange for pairwise sessions (TOFU or QR-pairing for initial identity trust).
 - Implement AES-GCM chunk encryption/decryption integrated into the envelope.
 - Implement role credential issuance (Supabase-side signing) and offline verification (client-side, public key baked into build).

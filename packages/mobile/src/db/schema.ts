@@ -1,7 +1,7 @@
 import { appSchema, tableSchema } from '@nozbe/watermelondb';
 
 export const schema = appSchema({
-  version: 1,
+  version: 2,
   tables: [
     tableSchema({
       name: 'users',
@@ -66,6 +66,20 @@ export const schema = appSchema({
         { name: 'status', type: 'string' },
         { name: 'retry_count', type: 'number' },
         { name: 'last_error', type: 'string', isOptional: true },
+        { name: 'created_at', type: 'number' },
+        { name: 'updated_at', type: 'number' },
+      ],
+    }),
+    tableSchema({
+      name: 'pending_messages',
+      columns: [
+        { name: 'message_id', type: 'string' },
+        { name: 'envelope_json', type: 'string' },
+        { name: 'type', type: 'string' },
+        { name: 'target_peer_id', type: 'string', isOptional: true },
+        { name: 'ttl_at_queue', type: 'number' },
+        { name: 'expires_at', type: 'number' },
+        { name: 'status', type: 'string' },
         { name: 'created_at', type: 'number' },
         { name: 'updated_at', type: 'number' },
       ],

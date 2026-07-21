@@ -88,3 +88,53 @@ export const CONNECT_TIMEOUT_MS = 15_000;
 export const RECONNECT_MAX_ATTEMPTS = 5;
 export const RECONNECT_BASE_DELAY_MS = 1_000;
 export const RECONNECT_MAX_DELAY_MS = 60_000;
+
+// ─── Phase 2: Envelope & Routing Types ───────────────────────────────────────
+
+export type EnvelopeType =
+  | 'TEXT'
+  | 'IMAGE'
+  | 'VIDEO_CHUNK'
+  | 'AUDIO'
+  | 'SOS'
+  | 'ROLE_CREDENTIAL'
+  | 'CHATBOT';
+
+export interface MeshEnvelope {
+  message_id: string;
+  type: EnvelopeType;
+  sender_id: string;
+  sender_role_cert: string;
+  ttl: number;
+  timestamp: number;
+  chunk_index: number;
+  chunk_total: number;
+  nonce: string;
+  ciphertext: string;
+  auth_tag: string;
+  route_history: string[];
+}
+
+export interface PendingOutboxEntry {
+  message_id: string;
+  envelope_json: string;
+  type: EnvelopeType;
+  target_peer_id?: string;
+  ttl_at_queue: number;
+  expires_at: number;
+  created_at: number;
+  updated_at: number;
+}
+
+export const PER_TYPE_TTL: Record<EnvelopeType, number> = {
+  TEXT: 5,
+  IMAGE: 4,
+  VIDEO_CHUNK: 3,
+  AUDIO: 4,
+  SOS: 7,
+  ROLE_CREDENTIAL: 2,
+  CHATBOT: 3,
+};
+
+export const DEDUP_CACHE_MAX = 1000;
+export const DEDUP_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes

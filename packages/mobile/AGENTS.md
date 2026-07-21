@@ -1,5 +1,7 @@
 # CRITICAL RULES - MUST FOLLOW
 
+- when /compact used write the context into Context.md 
+
 ## PLANNING MODE
 
 - Always ask clarifying questions
